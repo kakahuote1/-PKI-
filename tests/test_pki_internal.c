@@ -1,4 +1,4 @@
-﻿/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-License-Identifier: Apache-2.0 */
 
 #include "test_common.h"
 #include <openssl/bn.h>
@@ -369,6 +369,172 @@ static void test_phase136_fresh_root_record_matches_sync_state(void)
     TEST_PASS();
 }
 
+static void test_phase137_broadcast_policy_defaults_match_sync_digest(void)
+{
+    sm2_pki_broadcast_policy_t policy;
+    sm2_rev_sync_policy_t sync_policy;
+    uint8_t policy_digest[SM2_PKI_POLICY_DIGEST_LEN];
+    uint8_t default_digest[SM2_PKI_POLICY_DIGEST_LEN];
+
+    TEST_ASSERT(sm2_pki_broadcast_policy_init(&policy) == SM2_PKI_SUCCESS,
+        "Broadcast Policy Init");
+    TEST_ASSERT(
+        policy.root_validity_sec == SM2_PKI_BROADCAST_DEFAULT_ROOT_VALIDITY_SEC,
+        "Default Root Validity");
+    TEST_ASSERT(sm2_pki_broadcast_policy_to_rev_sync(&policy, &sync_policy)
+            == SM2_IC_SUCCESS,
+        "Broadcast To Rev Sync");
+    TEST_ASSERT(sync_policy.t_base_sec == SM2_REV_SYNC_DEFAULT_T_BASE_SEC,
+        "Default Base Cadence");
+    TEST_ASSERT(sync_policy.fast_poll_sec == SM2_REV_SYNC_DEFAULT_FAST_POLL_SEC,
+        "Default Fast Poll");
+    TEST_ASSERT(
+        sync_policy.max_backoff_sec == SM2_REV_SYNC_DEFAULT_MAX_BACKOFF_SEC,
+        "Default Max Backoff");
+    TEST_ASSERT(sync_policy.propagation_delay_sec
+            == SM2_REV_SYNC_DEFAULT_PROPAGATION_DELAY_SEC,
+        "Default Propagation Delay");
+    TEST_ASSERT(sync_policy.full_checkpoint_interval_sec
+            == SM2_REV_SYNC_DEFAULT_FULL_CHECKPOINT_SEC,
+        "Default Full Checkpoint");
+    TEST_ASSERT(sync_policy.max_delta_chain_len
+            == SM2_REV_SYNC_DEFAULT_MAX_DELTA_CHAIN_LEN,
+        "Default Delta Chain Limit");
+
+    TEST_ASSERT(sm2_pki_broadcast_policy_sync_digest(&policy, policy_digest)
+            == SM2_IC_SUCCESS,
+        "Broadcast Policy Digest");
+    TEST_ASSERT(
+        sm2_pki_default_sync_policy_digest(default_digest) == SM2_IC_SUCCESS,
+        "Default Sync Digest");
+    TEST_ASSERT(
+        memcmp(policy_digest, default_digest, sizeof(policy_digest)) == 0,
+        "Digest Compatibility");
+
+    policy.root_validity_sec = 0;
+    TEST_ASSERT(sm2_pki_broadcast_policy_to_rev_sync(&policy, &sync_policy)
+            == SM2_IC_ERR_PARAM,
+        "Reject Zero Root Validity");
+
+    TEST_ASSERT(sm2_pki_broadcast_policy_init(&policy) == SM2_PKI_SUCCESS,
+        "Broadcast Policy Reinit");
+    policy.fast_poll_sec = policy.t_base_sec + 1U;
+    TEST_ASSERT(sm2_pki_broadcast_policy_to_rev_sync(&policy, &sync_policy)
+            == SM2_IC_ERR_PARAM,
+        "Reject Invalid Poll Cadence");
+
+    TEST_PASS();
+}
+
+static void test_phase137_service_broadcast_policy_controls_root_window(void)
+{
+    sm2_pki_service_ctx_t *service = NULL;
+    const uint8_t issuer[] = "P137_BROADCAST_CA";
+    uint64_t base_now = test_now_unix();
+    TEST_ASSERT(sm2_pki_service_create(
+                    &service, issuer, sizeof(issuer) - 1, 8, 300, base_now)
+            == SM2_PKI_SUCCESS,
+        "Service Init");
+
+    sm2_pki_broadcast_policy_t policy;
+    TEST_ASSERT(sm2_pki_service_get_broadcast_policy(service, &policy)
+            == SM2_PKI_SUCCESS,
+        "Get Broadcast Policy");
+    TEST_ASSERT(policy.root_validity_sec == 300U, "Initial Root Validity");
+
+    policy.root_validity_sec = 120U;
+    uint64_t publish_now = base_now + 10U;
+    TEST_ASSERT(
+        sm2_pki_service_set_broadcast_policy(service, &policy, publish_now)
+            == SM2_PKI_SUCCESS,
+        "Set Broadcast Policy");
+
+    sm2_rev_root_record_t root_record;
+    TEST_ASSERT(sm2_pki_service_get_root_record(service, &root_record)
+            == SM2_PKI_SUCCESS,
+        "Get Root Record");
+    TEST_ASSERT(root_record.valid_until == publish_now + 120U,
+        "Revocation Root Uses Broadcast Validity");
+    TEST_ASSERT(
+        service->issuance_root_record.valid_until == root_record.valid_until,
+        "Issuance Root Uses Broadcast Validity");
+    TEST_ASSERT(
+        service->epoch_root_record.valid_until == root_record.valid_until,
+        "Epoch Root Uses Broadcast Validity");
+    TEST_ASSERT(
+        sm2_rev_root_valid_until(service->rev_ctx) == root_record.valid_until,
+        "Rev Context Validity Updated");
+
+    const uint8_t node_id[] = "P137_NODE";
+    sm2_rev_sync_hello_t hello;
+    TEST_ASSERT(sm2_rev_sync_build_hello(service->rev_ctx, node_id,
+                    sizeof(node_id) - 1, publish_now, &hello)
+            == SM2_IC_SUCCESS,
+        "Build Hello");
+    TEST_ASSERT(hello.root_valid_until == root_record.valid_until,
+        "Hello Uses Fresh Validity");
+
+    sm2_pki_service_destroy(&service);
+    TEST_PASS();
+}
+
+static void test_phase137_service_rejects_mismatched_sync_policy_digest(void)
+{
+    sm2_pki_service_ctx_t *service = NULL;
+    const uint8_t issuer[] = "P137_SYNC_BIND_CA";
+    uint64_t base_now = test_now_unix();
+    TEST_ASSERT(sm2_pki_service_create(
+                    &service, issuer, sizeof(issuer) - 1, 8, 300, base_now)
+            == SM2_PKI_SUCCESS,
+        "Service Init");
+
+    uint8_t witness_digest[SM2_PKI_POLICY_DIGEST_LEN];
+    uint8_t sync_digest[SM2_PKI_POLICY_DIGEST_LEN];
+    memset(witness_digest, 0xA7, sizeof(witness_digest));
+    memset(sync_digest, 0x5C, sizeof(sync_digest));
+    TEST_ASSERT(sm2_pki_service_set_epoch_policy_binding(service,
+                    SM2_PKI_DEFAULT_WITNESS_POLICY_VERSION, witness_digest,
+                    SM2_PKI_DEFAULT_SYNC_POLICY_VERSION, sync_digest, base_now)
+            == SM2_PKI_ERR_VERIFY,
+        "Reject Mismatched Sync Digest");
+
+    TEST_ASSERT(
+        sm2_pki_default_sync_policy_digest(sync_digest) == SM2_IC_SUCCESS,
+        "Default Sync Digest");
+    TEST_ASSERT(sm2_pki_service_set_epoch_policy_binding(service,
+                    SM2_PKI_DEFAULT_WITNESS_POLICY_VERSION, witness_digest,
+                    SM2_PKI_DEFAULT_SYNC_POLICY_VERSION, sync_digest, base_now)
+            == SM2_PKI_SUCCESS,
+        "Accept Matching Sync Digest");
+    TEST_ASSERT(
+        memcmp(service->sync_policy_hash, sync_digest, sizeof(sync_digest))
+            == 0,
+        "Service Stores Matching Digest");
+
+    sm2_pki_broadcast_policy_t policy;
+    TEST_ASSERT(sm2_pki_service_get_broadcast_policy(service, &policy)
+            == SM2_PKI_SUCCESS,
+        "Get Broadcast Policy");
+    policy.t_base_sec = 90U;
+    policy.max_backoff_sec = 360U;
+    policy.full_checkpoint_interval_sec = 7200U;
+    uint8_t custom_digest[SM2_PKI_POLICY_DIGEST_LEN];
+    TEST_ASSERT(sm2_pki_broadcast_policy_sync_digest(&policy, custom_digest)
+            == SM2_IC_SUCCESS,
+        "Custom Sync Digest");
+    TEST_ASSERT(
+        sm2_pki_service_set_broadcast_policy(service, &policy, base_now + 20U)
+            == SM2_PKI_SUCCESS,
+        "Set Custom Broadcast Policy");
+    TEST_ASSERT(
+        memcmp(service->sync_policy_hash, custom_digest, sizeof(custom_digest))
+            == 0,
+        "Policy Binding Tracks Broadcast Policy");
+
+    sm2_pki_service_destroy(&service);
+    TEST_PASS();
+}
+
 void run_test_pki_internal_suite(void)
 {
     RUN_TEST(test_phase7_service_ca_key_range_check);
@@ -377,4 +543,7 @@ void run_test_pki_internal_suite(void)
     RUN_TEST(test_phase134_service_revoke_refreshes_issuance_root);
     RUN_TEST(test_phase135_service_issue_failure_rolls_back_state);
     RUN_TEST(test_phase136_fresh_root_record_matches_sync_state);
+    RUN_TEST(test_phase137_broadcast_policy_defaults_match_sync_digest);
+    RUN_TEST(test_phase137_service_broadcast_policy_controls_root_window);
+    RUN_TEST(test_phase137_service_rejects_mismatched_sync_policy_digest);
 }

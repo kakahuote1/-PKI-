@@ -68,6 +68,12 @@ void sm2_pki_rev_set_root_valid_until(
     sm2_rev_internal_set_root_valid_until(ctx, root_valid_until);
 }
 
+sm2_ic_error_t sm2_pki_rev_set_root_valid_ttl(
+    sm2_rev_ctx_t *ctx, uint64_t root_valid_ttl_sec, uint64_t now_ts)
+{
+    return sm2_rev_internal_set_root_valid_ttl(ctx, root_valid_ttl_sec, now_ts);
+}
+
 static sm2_ic_error_t pki_issuance_serialize_root_for_auth(
     const sm2_rev_root_record_t *root_record, uint8_t *output,
     size_t output_cap, size_t *output_len)

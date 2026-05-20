@@ -14,6 +14,55 @@
 #include <openssl/ec.h>
 #include <openssl/obj_mac.h>
 
+static void service_u64_to_be(uint64_t v, uint8_t out[8])
+{
+    for (int i = 7; i >= 0; i--)
+    {
+        out[i] = (uint8_t)(v & 0xFFU);
+        v >>= 8U;
+    }
+}
+
+sm2_pki_error_t sm2_pki_broadcast_policy_init(
+    sm2_pki_broadcast_policy_t *policy)
+{
+    if (!policy)
+        return SM2_PKI_ERR_PARAM;
+
+    memset(policy, 0, sizeof(*policy));
+    policy->root_validity_sec = SM2_PKI_BROADCAST_DEFAULT_ROOT_VALIDITY_SEC;
+    policy->t_base_sec = SM2_REV_SYNC_DEFAULT_T_BASE_SEC;
+    policy->fast_poll_sec = SM2_REV_SYNC_DEFAULT_FAST_POLL_SEC;
+    policy->max_backoff_sec = SM2_REV_SYNC_DEFAULT_MAX_BACKOFF_SEC;
+    policy->propagation_delay_sec = SM2_REV_SYNC_DEFAULT_PROPAGATION_DELAY_SEC;
+    policy->full_checkpoint_interval_sec
+        = SM2_REV_SYNC_DEFAULT_FULL_CHECKPOINT_SEC;
+    policy->max_delta_chain_len = SM2_REV_SYNC_DEFAULT_MAX_DELTA_CHAIN_LEN;
+    policy->urgent_delta_grace_sec
+        = SM2_REV_SYNC_DEFAULT_URGENT_DELTA_GRACE_SEC;
+    return SM2_PKI_SUCCESS;
+}
+
+sm2_ic_error_t sm2_pki_broadcast_policy_to_rev_sync(
+    const sm2_pki_broadcast_policy_t *policy,
+    sm2_rev_sync_policy_t *sync_policy)
+{
+    if (!policy || !sync_policy || policy->root_validity_sec == 0)
+        return SM2_IC_ERR_PARAM;
+
+    memset(sync_policy, 0, sizeof(*sync_policy));
+    sync_policy->t_base_sec = policy->t_base_sec;
+    sync_policy->fast_poll_sec = policy->fast_poll_sec;
+    sync_policy->max_backoff_sec = policy->max_backoff_sec;
+    sync_policy->propagation_delay_sec = policy->propagation_delay_sec;
+    sync_policy->full_checkpoint_interval_sec
+        = policy->full_checkpoint_interval_sec;
+    sync_policy->max_delta_chain_len = policy->max_delta_chain_len;
+    sync_policy->urgent_delta_grace_sec = policy->urgent_delta_grace_sec;
+
+    uint64_t staleness_bound = 0;
+    return sm2_rev_sync_staleness_bound(sync_policy, 0, &staleness_bound);
+}
 static sm2_pki_service_state_t *service_state(sm2_pki_service_ctx_t *ctx)
 {
     return ctx;
@@ -23,6 +72,72 @@ static const sm2_pki_service_state_t *service_state_const(
     const sm2_pki_service_ctx_t *ctx)
 {
     return ctx;
+}
+
+sm2_ic_error_t sm2_pki_broadcast_policy_sync_digest(
+    const sm2_pki_broadcast_policy_t *policy,
+    uint8_t digest[SM2_PKI_POLICY_DIGEST_LEN])
+{
+    static const uint8_t tag[] = "SM2PKI_SYNC_POLICY_V1";
+    if (!policy || !digest)
+        return SM2_IC_ERR_PARAM;
+
+    sm2_rev_sync_policy_t sync_policy;
+    sm2_ic_error_t ret
+        = sm2_pki_broadcast_policy_to_rev_sync(policy, &sync_policy);
+    if (ret != SM2_IC_SUCCESS)
+        return ret;
+
+    uint8_t auth[(sizeof(tag) - 1U) + 8U * 7U];
+    size_t off = 0;
+    memcpy(auth + off, tag, sizeof(tag) - 1U);
+    off += sizeof(tag) - 1U;
+    service_u64_to_be(sync_policy.t_base_sec, auth + off);
+    off += 8U;
+    service_u64_to_be(sync_policy.fast_poll_sec, auth + off);
+    off += 8U;
+    service_u64_to_be(sync_policy.max_backoff_sec, auth + off);
+    off += 8U;
+    service_u64_to_be(sync_policy.propagation_delay_sec, auth + off);
+    off += 8U;
+    service_u64_to_be(sync_policy.full_checkpoint_interval_sec, auth + off);
+    off += 8U;
+    service_u64_to_be((uint64_t)sync_policy.max_delta_chain_len, auth + off);
+    off += 8U;
+    service_u64_to_be(sync_policy.urgent_delta_grace_sec, auth + off);
+    off += 8U;
+
+    ret = off == sizeof(auth) ? sm2_ic_sm3_hash(auth, off, digest)
+                              : SM2_IC_ERR_PARAM;
+    sm2_secure_memzero(auth, sizeof(auth));
+    return ret;
+}
+
+static uint64_t service_broadcast_root_validity_sec(
+    const sm2_pki_service_state_t *state)
+{
+    if (state && state->broadcast_policy.root_validity_sec != 0)
+        return state->broadcast_policy.root_validity_sec;
+    return SM2_PKI_BROADCAST_DEFAULT_ROOT_VALIDITY_SEC;
+}
+
+static bool service_broadcast_policy_equal(
+    const sm2_pki_broadcast_policy_t *lhs,
+    const sm2_pki_broadcast_policy_t *rhs)
+{
+    if (!lhs || !rhs)
+        return false;
+
+    bool same_full_checkpoint = lhs->full_checkpoint_interval_sec
+        == rhs->full_checkpoint_interval_sec;
+    return lhs->root_validity_sec == rhs->root_validity_sec
+        && lhs->t_base_sec == rhs->t_base_sec
+        && lhs->fast_poll_sec == rhs->fast_poll_sec
+        && lhs->max_backoff_sec == rhs->max_backoff_sec
+        && lhs->propagation_delay_sec == rhs->propagation_delay_sec
+        && same_full_checkpoint
+        && lhs->max_delta_chain_len == rhs->max_delta_chain_len
+        && lhs->urgent_delta_grace_sec == rhs->urgent_delta_grace_sec;
 }
 
 static void service_finalize_state(sm2_pki_service_state_t *state)
@@ -345,7 +460,7 @@ static sm2_ic_error_t service_publish_revocation_root(
 static uint64_t service_root_valid_until(
     const sm2_pki_service_state_t *state, uint64_t now_ts)
 {
-    uint64_t ttl = 300;
+    uint64_t ttl = service_broadcast_root_validity_sec(state);
     if (state && state->rev_ctx)
     {
         uint64_t rev_until = sm2_rev_root_valid_until(state->rev_ctx);
@@ -368,7 +483,8 @@ static sm2_ic_error_t service_sign_issuance_root(sm2_pki_service_ctx_t *ctx,
         return SM2_IC_ERR_PARAM;
 
     uint64_t valid_until = service_root_valid_until(state, now_ts);
-    uint64_t valid_from = now_ts > 300U ? now_ts - 300U : 0U;
+    uint64_t ttl = service_broadcast_root_validity_sec(state);
+    uint64_t valid_from = now_ts > ttl ? now_ts - ttl : 0U;
     uint8_t root_hash[SM2_REV_MERKLE_HASH_LEN];
     sm2_ic_error_t ret
         = sm2_pki_issuance_tree_get_root_hash(tree_to_sign, root_hash);
@@ -781,6 +897,129 @@ bool sm2_pki_service_binding_live(const sm2_pki_service_state_t *state)
         && state->revocation_state_ready;
 }
 
+sm2_pki_error_t sm2_pki_service_get_broadcast_policy(
+    const sm2_pki_service_ctx_t *ctx, sm2_pki_broadcast_policy_t *policy)
+{
+    const sm2_pki_service_state_t *state = service_state_const(ctx);
+    if (!ctx || !ctx->initialized || !state || !policy)
+        return SM2_PKI_ERR_PARAM;
+
+    *policy = state->broadcast_policy;
+    return SM2_PKI_SUCCESS;
+}
+
+static sm2_pki_error_t service_refresh_policy_hash(
+    sm2_pki_service_state_t *state)
+{
+    if (!state || !state->epoch_policy_binding_ready)
+        return SM2_PKI_SUCCESS;
+
+    uint8_t sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN];
+    sm2_ic_error_t ic_ret = sm2_pki_broadcast_policy_sync_digest(
+        &state->broadcast_policy, sync_policy_hash);
+    if (ic_ret != SM2_IC_SUCCESS)
+        return sm2_pki_error_from_ic(ic_ret);
+
+    memcpy(state->sync_policy_hash, sync_policy_hash, sizeof(sync_policy_hash));
+    sm2_secure_memzero(sync_policy_hash, sizeof(sync_policy_hash));
+    return SM2_PKI_SUCCESS;
+}
+
+sm2_pki_error_t sm2_pki_service_set_broadcast_policy(sm2_pki_service_ctx_t *ctx,
+    const sm2_pki_broadcast_policy_t *policy, uint64_t now_ts)
+{
+    sm2_pki_service_state_t *state = service_state(ctx);
+    if (!ctx || !ctx->initialized || !state || !policy)
+        return SM2_PKI_ERR_PARAM;
+
+    sm2_rev_sync_policy_t sync_policy;
+    sm2_ic_error_t ic_ret
+        = sm2_pki_broadcast_policy_to_rev_sync(policy, &sync_policy);
+    if (ic_ret != SM2_IC_SUCCESS)
+        return sm2_pki_error_from_ic(ic_ret);
+    if (service_broadcast_policy_equal(&state->broadcast_policy, policy))
+        return SM2_PKI_SUCCESS;
+
+    sm2_pki_broadcast_policy_t old_policy = state->broadcast_policy;
+    sm2_rev_sync_policy_t old_sync_policy = state->rev_sync_policy;
+    sm2_rev_root_record_t old_rev_root_record = state->rev_root_record;
+    sm2_rev_root_record_t old_issuance_root_record
+        = state->issuance_root_record;
+    sm2_pki_epoch_root_record_t old_epoch_root_record
+        = state->epoch_root_record;
+    uint64_t old_epoch_version = state->epoch_version;
+    bool old_revocation_ready = state->revocation_state_ready;
+    bool old_issuance_ready = state->issuance_state_ready;
+    bool old_epoch_ready = state->epoch_state_ready;
+    uint8_t old_sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN];
+    memcpy(old_sync_policy_hash, state->sync_policy_hash,
+        sizeof(old_sync_policy_hash));
+    uint64_t old_rev_valid_until
+        = state->rev_ctx ? sm2_rev_root_valid_until(state->rev_ctx) : 0U;
+
+    state->broadcast_policy = *policy;
+    state->rev_sync_policy = sync_policy;
+    sm2_pki_error_t err = service_refresh_policy_hash(state);
+    if (err != SM2_PKI_SUCCESS)
+        goto rollback;
+
+    ic_ret = sm2_pki_rev_set_root_valid_ttl(
+        state->rev_ctx, policy->root_validity_sec, now_ts);
+    if (ic_ret != SM2_IC_SUCCESS)
+    {
+        err = sm2_pki_error_from_ic(ic_ret);
+        goto rollback;
+    }
+
+    if (state->revocation_state_ready)
+    {
+        ic_ret = service_publish_revocation_root(ctx, now_ts, false);
+        if (ic_ret != SM2_IC_SUCCESS)
+        {
+            err = sm2_pki_error_from_ic(ic_ret);
+            goto rollback;
+        }
+    }
+    if (state->issuance_state_ready)
+    {
+        ic_ret = service_publish_issuance_root(ctx, now_ts, false);
+        if (ic_ret != SM2_IC_SUCCESS)
+        {
+            err = sm2_pki_error_from_ic(ic_ret);
+            goto rollback;
+        }
+    }
+    if (state->revocation_state_ready && state->issuance_state_ready)
+    {
+        ic_ret = service_publish_epoch_root(ctx, now_ts);
+        if (ic_ret != SM2_IC_SUCCESS)
+        {
+            err = sm2_pki_error_from_ic(ic_ret);
+            goto rollback;
+        }
+    }
+    sm2_secure_memzero(old_sync_policy_hash, sizeof(old_sync_policy_hash));
+    return SM2_PKI_SUCCESS;
+
+rollback:
+    state->broadcast_policy = old_policy;
+    state->rev_sync_policy = old_sync_policy;
+    state->rev_root_record = old_rev_root_record;
+    state->issuance_root_record = old_issuance_root_record;
+    state->epoch_root_record = old_epoch_root_record;
+    state->epoch_version = old_epoch_version;
+    state->revocation_state_ready = old_revocation_ready;
+    state->issuance_state_ready = old_issuance_ready;
+    state->epoch_state_ready = old_epoch_ready;
+    memcpy(state->sync_policy_hash, old_sync_policy_hash,
+        sizeof(old_sync_policy_hash));
+    sm2_pki_rev_set_root_valid_ttl(
+        state->rev_ctx, old_policy.root_validity_sec, now_ts);
+    sm2_pki_rev_set_root_valid_until(state->rev_ctx, old_rev_valid_until);
+    sm2_secure_memzero(old_sync_policy_hash, sizeof(old_sync_policy_hash));
+    return err;
+}
+
 sm2_pki_error_t sm2_pki_service_create(sm2_pki_service_ctx_t **ctx,
     const uint8_t *issuer_id, size_t issuer_id_len,
     size_t expected_revoked_items, uint64_t filter_ttl_sec, uint64_t now_ts)
@@ -812,8 +1051,24 @@ sm2_pki_error_t sm2_pki_service_create(sm2_pki_service_ctx_t **ctx,
         sm2_pki_service_destroy(&state);
         return SM2_PKI_ERR_CRYPTO;
     }
-    sm2_ic_error_t ic_ret = sm2_rev_init(
-        &state->rev_ctx, expected_revoked_items, filter_ttl_sec, now_ts);
+    sm2_pki_error_t err
+        = sm2_pki_broadcast_policy_init(&state->broadcast_policy);
+    if (err != SM2_PKI_SUCCESS)
+    {
+        sm2_pki_service_destroy(&state);
+        return err;
+    }
+    state->broadcast_policy.root_validity_sec = filter_ttl_sec;
+    sm2_ic_error_t ic_ret = sm2_pki_broadcast_policy_to_rev_sync(
+        &state->broadcast_policy, &state->rev_sync_policy);
+    if (ic_ret != SM2_IC_SUCCESS)
+    {
+        sm2_pki_service_destroy(&state);
+        return sm2_pki_error_from_ic(ic_ret);
+    }
+
+    ic_ret = sm2_rev_init(&state->rev_ctx, expected_revoked_items,
+        state->broadcast_policy.root_validity_sec, now_ts);
     if (ic_ret != SM2_IC_SUCCESS)
     {
         sm2_pki_service_destroy(&state);
@@ -905,6 +1160,18 @@ sm2_pki_error_t sm2_pki_service_set_epoch_policy_binding(
         return SM2_PKI_ERR_PARAM;
     }
 
+    uint8_t expected_sync_hash[SM2_PKI_POLICY_DIGEST_LEN];
+    sm2_ic_error_t ic_ret = sm2_pki_broadcast_policy_sync_digest(
+        &state->broadcast_policy, expected_sync_hash);
+    if (ic_ret != SM2_IC_SUCCESS)
+        return sm2_pki_error_from_ic(ic_ret);
+    if (memcmp(expected_sync_hash, sync_policy_hash, sizeof(expected_sync_hash))
+        != 0)
+    {
+        sm2_secure_memzero(expected_sync_hash, sizeof(expected_sync_hash));
+        return SM2_PKI_ERR_VERIFY;
+    }
+    sm2_secure_memzero(expected_sync_hash, sizeof(expected_sync_hash));
     bool changed = !state->epoch_policy_binding_ready
         || state->witness_policy_version != witness_policy_version
         || state->sync_policy_version != sync_policy_version
@@ -928,7 +1195,7 @@ sm2_pki_error_t sm2_pki_service_set_epoch_policy_binding(
     if (!state->revocation_state_ready || !state->issuance_state_ready)
         return SM2_PKI_SUCCESS;
 
-    sm2_ic_error_t ic_ret = service_publish_epoch_root(ctx, now_ts);
+    ic_ret = service_publish_epoch_root(ctx, now_ts);
     return sm2_pki_error_from_ic(ic_ret);
 }
 sm2_pki_error_t sm2_pki_service_get_root_record(

@@ -1780,37 +1780,14 @@ sm2_ic_error_t sm2_pki_transparency_policy_digest(
 sm2_ic_error_t sm2_pki_default_sync_policy_digest(
     uint8_t digest[SM2_PKI_POLICY_DIGEST_LEN])
 {
-    static const uint8_t tag[] = "SM2PKI_SYNC_POLICY_V1";
     if (!digest)
         return SM2_IC_ERR_PARAM;
 
-    sm2_rev_sync_policy_t policy;
-    sm2_ic_error_t ret = sm2_rev_sync_policy_init(&policy);
-    if (ret != SM2_IC_SUCCESS)
-        return ret;
-
-    uint8_t auth[(sizeof(tag) - 1U) + 8U * 7U];
-    size_t off = 0;
-    memcpy(auth + off, tag, sizeof(tag) - 1U);
-    off += sizeof(tag) - 1U;
-    pki_client_cache_u64_to_be(policy.t_base_sec, auth + off);
-    off += 8U;
-    pki_client_cache_u64_to_be(policy.fast_poll_sec, auth + off);
-    off += 8U;
-    pki_client_cache_u64_to_be(policy.max_backoff_sec, auth + off);
-    off += 8U;
-    pki_client_cache_u64_to_be(policy.propagation_delay_sec, auth + off);
-    off += 8U;
-    pki_client_cache_u64_to_be(policy.full_checkpoint_interval_sec, auth + off);
-    off += 8U;
-    pki_client_cache_u64_to_be(
-        (uint64_t)policy.max_delta_chain_len, auth + off);
-    off += 8U;
-    pki_client_cache_u64_to_be(policy.urgent_delta_grace_sec, auth + off);
-    off += 8U;
-
-    return off == sizeof(auth) ? sm2_ic_sm3_hash(auth, off, digest)
-                               : SM2_IC_ERR_PARAM;
+    sm2_pki_broadcast_policy_t policy;
+    sm2_pki_error_t ret = sm2_pki_broadcast_policy_init(&policy);
+    if (ret != SM2_PKI_SUCCESS)
+        return SM2_IC_ERR_PARAM;
+    return sm2_pki_broadcast_policy_sync_digest(&policy, digest);
 }
 
 static sm2_pki_error_t pki_client_check_epoch_policy_binding(

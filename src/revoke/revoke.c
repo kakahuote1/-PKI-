@@ -499,6 +499,17 @@ void sm2_rev_internal_set_root_valid_until(
     ctx->root_valid_until = root_valid_until;
 }
 
+sm2_ic_error_t sm2_rev_internal_set_root_valid_ttl(
+    sm2_rev_ctx_t *ctx, uint64_t root_valid_ttl_sec, uint64_t now_ts)
+{
+    if (!ctx || root_valid_ttl_sec == 0)
+        return SM2_IC_ERR_PARAM;
+
+    ctx->root_valid_ttl_sec = root_valid_ttl_sec;
+    ctx->root_valid_until = rev_ctx_compute_valid_until(ctx, now_ts);
+    return SM2_IC_SUCCESS;
+}
+
 sm2_ic_error_t sm2_rev_init(sm2_rev_ctx_t **ctx, size_t expected_revoked_items,
     uint64_t filter_ttl_sec, uint64_t now_ts)
 {
