@@ -52,6 +52,41 @@ extern "C"
         size_t witness_signature_count;
     } sm2_pki_epoch_checkpoint_t;
 
+    typedef enum
+    {
+        SM2_PKI_EDGE_CHECKPOINT_DECISION_NONE = 0,
+        SM2_PKI_EDGE_CHECKPOINT_DECISION_ACCEPTED = 1,
+        SM2_PKI_EDGE_CHECKPOINT_DECISION_STALE = 2,
+        SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM = 3,
+        SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED = 4
+    } sm2_pki_edge_checkpoint_decision_t;
+
+    typedef struct
+    {
+        const uint8_t *node_id;
+        size_t node_id_len;
+        const sm2_pki_epoch_checkpoint_t *checkpoint;
+    } sm2_pki_edge_checkpoint_sample_t;
+
+    typedef struct
+    {
+        sm2_pki_edge_checkpoint_decision_t decision;
+        size_t sample_count;
+        size_t valid_sample_count;
+        size_t invalid_sample_count;
+        bool has_local_epoch;
+        uint64_t local_epoch_version;
+        uint8_t local_epoch_digest[SM2_PKI_EPOCH_ROOT_DIGEST_LEN];
+        bool has_local_revocation_root;
+        uint64_t local_revocation_root_version;
+        bool has_local_issuance_root;
+        uint64_t local_issuance_root_version;
+        bool has_selected_checkpoint;
+        size_t selected_sample_index;
+        sm2_pki_epoch_checkpoint_t selected_checkpoint;
+        sm2_pki_epoch_quorum_result_t quorum;
+    } sm2_pki_edge_checkpoint_result_t;
+
 #define SM2_PKI_CLIENT_PERSISTED_STATE_VERSION 1U
 #define SM2_PKI_CLIENT_PERSISTED_STATE_MAX_AUTHORITIES 16U
 #define SM2_PKI_CLIENT_PERSISTED_STORAGE_VERSION 1U
@@ -160,6 +195,15 @@ extern "C"
     sm2_pki_error_t sm2_pki_client_import_epoch_checkpoint(
         sm2_pki_client_ctx_t *ctx, const sm2_pki_epoch_checkpoint_t *checkpoint,
         uint64_t now_ts);
+
+    /* Verifies edge-supplied checkpoints, requires t-of-n agreement, then
+
+     * * imports the selected checkpoint without accepting local rollback. */
+    sm2_pki_error_t sm2_pki_client_import_edge_checkpoint_quorum(
+        sm2_pki_client_ctx_t *ctx,
+        const sm2_pki_edge_checkpoint_sample_t *samples, size_t sample_count,
+        size_t threshold, uint64_t now_ts,
+        sm2_pki_edge_checkpoint_result_t *result);
 
     sm2_pki_error_t sm2_pki_client_export_epoch_checkpoint(
         const sm2_pki_client_ctx_t *ctx, const uint8_t *authority_id,

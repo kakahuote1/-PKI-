@@ -423,6 +423,7 @@ void run_test_pki_suite(void)
     RUN_TEST(test_phase145_evidence_cache_capacity_and_pollution_bounds);
     RUN_TEST(test_phase141_issuance_transparency_required_and_threshold);
     RUN_TEST(test_phase142_epoch_witness_append_only_and_quorum);
+    RUN_TEST(test_phase146_edge_checkpoint_quorum_product_flow);
     RUN_TEST(test_phase143_epoch_bundle_binds_roots_and_witnesses);
     RUN_TEST(test_phase144_evidence_bundle_standard_wire_sections);
     RUN_TEST(test_phase139_root_versions_are_scoped_per_authority);

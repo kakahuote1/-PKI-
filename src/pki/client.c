@@ -2251,6 +2251,106 @@ static sm2_pki_error_t pki_client_validate_epoch_checkpoint(
         checkpoint->witness_signature_count, policy, now_ts);
 }
 
+static bool pki_client_edge_node_id_valid(
+    const uint8_t *node_id, size_t node_id_len)
+{
+    return node_id && node_id_len > 0
+        && node_id_len <= SM2_REV_SYNC_NODE_ID_MAX_LEN;
+}
+
+static void pki_client_edge_result_note_local(
+    sm2_pki_edge_checkpoint_result_t *result,
+    const sm2_pki_epoch_cache_entry_t *entry)
+{
+    if (!result || !entry)
+        return;
+
+    if (entry->has_epoch_digest)
+    {
+        result->has_local_epoch = true;
+        result->local_epoch_version = entry->highest_seen_epoch_version;
+        memcpy(result->local_epoch_digest, entry->epoch_digest,
+            sizeof(result->local_epoch_digest));
+    }
+    if (entry->has_revocation_root)
+    {
+        result->has_local_revocation_root = true;
+        result->local_revocation_root_version
+            = entry->highest_seen_revocation_root_version;
+    }
+    if (entry->has_issuance_root)
+    {
+        result->has_local_issuance_root = true;
+        result->local_issuance_root_version
+            = entry->highest_seen_issuance_root_version;
+    }
+}
+
+static sm2_pki_edge_checkpoint_decision_t
+pki_client_edge_checkpoint_cache_decision(
+    const sm2_pki_epoch_cache_entry_t *entry,
+    const sm2_pki_epoch_root_record_t *root_record,
+    const uint8_t epoch_digest[SM2_PKI_EPOCH_ROOT_DIGEST_LEN],
+    size_t matched_ca_index)
+{
+    if (!entry || !root_record || !epoch_digest)
+        return SM2_PKI_EDGE_CHECKPOINT_DECISION_ACCEPTED;
+
+    if (entry->has_pinned_ca_index
+        && entry->pinned_ca_index != matched_ca_index)
+    {
+        return SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED;
+    }
+    if (entry->has_epoch_digest)
+    {
+        if (root_record->epoch_version < entry->highest_seen_epoch_version)
+            return SM2_PKI_EDGE_CHECKPOINT_DECISION_STALE;
+        if (root_record->epoch_version == entry->highest_seen_epoch_version
+            && memcmp(epoch_digest, entry->epoch_digest,
+                   SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
+                != 0)
+        {
+            return SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED;
+        }
+    }
+    if (entry->has_revocation_root)
+    {
+        if (root_record->revocation_root_version
+            < entry->highest_seen_revocation_root_version)
+        {
+            return SM2_PKI_EDGE_CHECKPOINT_DECISION_STALE;
+        }
+        if (root_record->revocation_root_version
+                == entry->highest_seen_revocation_root_version
+            && memcmp(root_record->revocation_root_hash,
+                   entry->latest_revocation_root_hash,
+                   sizeof(root_record->revocation_root_hash))
+                != 0)
+        {
+            return SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED;
+        }
+    }
+    if (entry->has_issuance_root)
+    {
+        if (root_record->issuance_root_version
+            < entry->highest_seen_issuance_root_version)
+        {
+            return SM2_PKI_EDGE_CHECKPOINT_DECISION_STALE;
+        }
+        if (root_record->issuance_root_version
+                == entry->highest_seen_issuance_root_version
+            && memcmp(root_record->issuance_root_hash,
+                   entry->latest_issuance_root_hash,
+                   sizeof(root_record->issuance_root_hash))
+                != 0)
+        {
+            return SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED;
+        }
+    }
+
+    return SM2_PKI_EDGE_CHECKPOINT_DECISION_ACCEPTED;
+}
+
 sm2_pki_error_t sm2_pki_client_import_epoch_checkpoint(
     sm2_pki_client_ctx_t *ctx, const sm2_pki_epoch_checkpoint_t *checkpoint,
     uint64_t now_ts)
@@ -2268,6 +2368,201 @@ sm2_pki_error_t sm2_pki_client_import_epoch_checkpoint(
     return pki_client_accept_epoch_root_record(state,
         &checkpoint->epoch_root_record, now_ts, matched_ca_index,
         checkpoint->witness_signatures, checkpoint->witness_signature_count);
+}
+
+sm2_pki_error_t sm2_pki_client_import_edge_checkpoint_quorum(
+    sm2_pki_client_ctx_t *ctx, const sm2_pki_edge_checkpoint_sample_t *samples,
+    size_t sample_count, size_t threshold, uint64_t now_ts,
+    sm2_pki_edge_checkpoint_result_t *result)
+{
+    sm2_pki_client_state_t *state = pki_client_state(ctx);
+    if (!ctx || !ctx->initialized || !state || !samples || sample_count == 0
+        || threshold == 0 || !result)
+    {
+        return SM2_PKI_ERR_PARAM;
+    }
+    if (sample_count > SM2_REV_QUORUM_MAX_VOTES)
+        return SM2_PKI_ERR_PARAM;
+
+    memset(result, 0, sizeof(*result));
+    result->sample_count = sample_count;
+    result->selected_sample_index = SIZE_MAX;
+    result->decision = SM2_PKI_EDGE_CHECKPOINT_DECISION_NONE;
+
+    sm2_pki_epoch_root_vote_t *votes
+        = (sm2_pki_epoch_root_vote_t *)calloc(sample_count, sizeof(*votes));
+    size_t *sample_indices
+        = (size_t *)calloc(sample_count, sizeof(*sample_indices));
+    size_t *ca_indices = (size_t *)calloc(sample_count, sizeof(*ca_indices));
+    if (!votes || !sample_indices || !ca_indices)
+    {
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return SM2_PKI_ERR_MEMORY;
+    }
+
+    uint8_t authority_id[SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN];
+    size_t authority_id_len = 0;
+    size_t authority_ca_index = 0;
+    bool has_authority = false;
+    size_t vote_count = 0;
+
+    for (size_t i = 0; i < sample_count; i++)
+    {
+        const sm2_pki_edge_checkpoint_sample_t *sample = &samples[i];
+        if (!pki_client_edge_node_id_valid(sample->node_id, sample->node_id_len)
+            || !sample->checkpoint)
+        {
+            result->invalid_sample_count++;
+            continue;
+        }
+
+        size_t matched_ca_index = 0;
+        sm2_pki_error_t ret = pki_client_validate_epoch_checkpoint(
+            state, sample->checkpoint, now_ts, &matched_ca_index);
+        if (ret != SM2_PKI_SUCCESS)
+        {
+            result->invalid_sample_count++;
+            continue;
+        }
+
+        const sm2_pki_epoch_root_record_t *root_record
+            = &sample->checkpoint->epoch_root_record;
+        if (!has_authority)
+        {
+            memcpy(authority_id, root_record->authority_id,
+                root_record->authority_id_len);
+            authority_id_len = root_record->authority_id_len;
+            authority_ca_index = matched_ca_index;
+            has_authority = true;
+        }
+        else if (authority_id_len != root_record->authority_id_len
+            || memcmp(authority_id, root_record->authority_id, authority_id_len)
+                != 0
+            || authority_ca_index != matched_ca_index)
+        {
+            result->invalid_sample_count++;
+            continue;
+        }
+
+        uint8_t digest[SM2_PKI_EPOCH_ROOT_DIGEST_LEN];
+        sm2_ic_error_t ic_ret = sm2_pki_epoch_root_digest(root_record, digest);
+        if (ic_ret != SM2_IC_SUCCESS)
+        {
+            result->invalid_sample_count++;
+            continue;
+        }
+
+        memcpy(votes[vote_count].node_id, sample->node_id, sample->node_id_len);
+        votes[vote_count].node_id_len = sample->node_id_len;
+        votes[vote_count].epoch_version = root_record->epoch_version;
+        memcpy(votes[vote_count].epoch_digest, digest,
+            sizeof(votes[vote_count].epoch_digest));
+        votes[vote_count].proof_valid = true;
+        sample_indices[vote_count] = i;
+        ca_indices[vote_count] = matched_ca_index;
+        vote_count++;
+        result->valid_sample_count++;
+    }
+
+    if (vote_count == 0)
+    {
+        result->decision = SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM;
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return SM2_PKI_ERR_VERIFY;
+    }
+
+    const sm2_pki_epoch_cache_entry_t *entry
+        = pki_client_find_epoch_root_cache_entry_const(
+            state, authority_id, authority_id_len);
+    pki_client_edge_result_note_local(result, entry);
+
+    sm2_pki_error_t ret = sm2_pki_epoch_quorum_check(
+        votes, vote_count, threshold, &result->quorum);
+    if (ret != SM2_PKI_SUCCESS)
+    {
+        result->decision = result->quorum.fork_detected
+            ? SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED
+            : SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM;
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return result->quorum.fork_detected ? SM2_PKI_ERR_CONFLICT : ret;
+    }
+    if (!result->quorum.quorum_met)
+    {
+        result->decision = SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM;
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return SM2_PKI_ERR_VERIFY;
+    }
+
+    size_t selected_vote_index = SIZE_MAX;
+    for (size_t i = 0; i < vote_count; i++)
+    {
+        if (votes[i].epoch_version == result->quorum.selected_epoch_version
+            && memcmp(votes[i].epoch_digest,
+                   result->quorum.selected_epoch_digest,
+                   sizeof(votes[i].epoch_digest))
+                == 0)
+        {
+            selected_vote_index = i;
+            break;
+        }
+    }
+    if (selected_vote_index == SIZE_MAX)
+    {
+        result->decision = SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM;
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return SM2_PKI_ERR_STATE;
+    }
+
+    result->selected_sample_index = sample_indices[selected_vote_index];
+    result->selected_checkpoint
+        = *samples[result->selected_sample_index].checkpoint;
+    result->has_selected_checkpoint = true;
+
+    const sm2_pki_epoch_root_record_t *selected_root
+        = &result->selected_checkpoint.epoch_root_record;
+    result->decision = pki_client_edge_checkpoint_cache_decision(entry,
+        selected_root, result->quorum.selected_epoch_digest,
+        ca_indices[selected_vote_index]);
+    if (result->decision != SM2_PKI_EDGE_CHECKPOINT_DECISION_ACCEPTED)
+    {
+        sm2_pki_error_t out
+            = result->decision == SM2_PKI_EDGE_CHECKPOINT_DECISION_FORK_DETECTED
+            ? SM2_PKI_ERR_CONFLICT
+            : SM2_PKI_ERR_VERIFY;
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return out;
+    }
+
+    ret = pki_client_accept_epoch_root_record(state, selected_root, now_ts,
+        ca_indices[selected_vote_index],
+        result->selected_checkpoint.witness_signatures,
+        result->selected_checkpoint.witness_signature_count);
+    if (ret != SM2_PKI_SUCCESS)
+    {
+        result->decision = SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM;
+        free(votes);
+        free(sample_indices);
+        free(ca_indices);
+        return ret;
+    }
+
+    result->decision = SM2_PKI_EDGE_CHECKPOINT_DECISION_ACCEPTED;
+    free(votes);
+    free(sample_indices);
+    free(ca_indices);
+    return SM2_PKI_SUCCESS;
 }
 
 sm2_pki_error_t sm2_pki_client_export_epoch_checkpoint(
