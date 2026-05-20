@@ -49,6 +49,8 @@ sm2_ic_error_t sm2_pki_epoch_root_encode_witness_payload(
     size_t output_cap, size_t *output_len);
 void sm2_pki_rev_set_root_valid_until(
     sm2_rev_ctx_t *ctx, uint64_t root_valid_until);
+sm2_ic_error_t sm2_pki_rev_set_root_valid_ttl(
+    sm2_rev_ctx_t *ctx, uint64_t root_valid_ttl_sec, uint64_t now_ts);
 sm2_ic_error_t sm2_pki_issuance_leaf_key(
     const sm2_implicit_cert_t *cert, uint64_t *leaf_key);
 sm2_ic_error_t sm2_pki_issuance_cert_commitment(const sm2_implicit_cert_t *cert,
@@ -190,6 +192,8 @@ struct sm2_pki_service_ctx_st
     sm2_rev_ctx_t *rev_ctx;
     sm2_rev_tree_t *rev_tree;
     sm2_rev_root_record_t rev_root_record;
+    sm2_pki_broadcast_policy_t broadcast_policy;
+    sm2_rev_sync_policy_t rev_sync_policy;
     bool revocation_state_ready;
 
     uint8_t (*issuance_commitments)[SM2_PKI_ISSUANCE_COMMITMENT_LEN];

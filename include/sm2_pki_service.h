@@ -26,8 +26,44 @@ extern "C"
 #define SM2_PKI_MAX_IDENTITIES 256
 #define SM2_PKI_MAX_ID_LEN 64
 #define SM2_PKI_MAX_ISSUER_LEN 64
+#define SM2_PKI_BROADCAST_DEFAULT_ROOT_VALIDITY_SEC 300U
 
     typedef struct sm2_pki_service_ctx_st sm2_pki_service_ctx_t;
+
+    /*
+     * CA broadcast policy.
+     * Root validity and sync cadence are
+     * configured together.
+     */
+    typedef struct
+    {
+        uint64_t root_validity_sec;
+        uint64_t t_base_sec;
+        uint64_t fast_poll_sec;
+        uint64_t max_backoff_sec;
+        uint64_t propagation_delay_sec;
+        uint64_t full_checkpoint_interval_sec;
+        size_t max_delta_chain_len;
+        uint64_t urgent_delta_grace_sec;
+    } sm2_pki_broadcast_policy_t;
+
+    sm2_pki_error_t sm2_pki_broadcast_policy_init(
+        sm2_pki_broadcast_policy_t *policy);
+
+    sm2_ic_error_t sm2_pki_broadcast_policy_to_rev_sync(
+        const sm2_pki_broadcast_policy_t *policy,
+        sm2_rev_sync_policy_t *sync_policy);
+
+    sm2_ic_error_t sm2_pki_broadcast_policy_sync_digest(
+        const sm2_pki_broadcast_policy_t *policy,
+        uint8_t digest[SM2_PKI_POLICY_DIGEST_LEN]);
+
+    sm2_pki_error_t sm2_pki_service_set_broadcast_policy(
+        sm2_pki_service_ctx_t *ctx, const sm2_pki_broadcast_policy_t *policy,
+        uint64_t now_ts);
+
+    sm2_pki_error_t sm2_pki_service_get_broadcast_policy(
+        const sm2_pki_service_ctx_t *ctx, sm2_pki_broadcast_policy_t *policy);
 
     /*
      * Opaque owning handle.

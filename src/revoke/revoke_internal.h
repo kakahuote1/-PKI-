@@ -84,6 +84,8 @@ sm2_ic_error_t sm2_rev_internal_prepare_root_publication(
     uint64_t *root_valid_until);
 void sm2_rev_internal_set_root_valid_until(
     sm2_rev_ctx_t *ctx, uint64_t root_valid_until);
+sm2_ic_error_t sm2_rev_internal_set_root_valid_ttl(
+    sm2_rev_ctx_t *ctx, uint64_t root_valid_ttl_sec, uint64_t now_ts);
 
 sm2_ic_error_t sm2_rev_tree_build(sm2_rev_tree_t **tree,
     const uint64_t *revoked_serials, size_t revoked_count,
