@@ -181,6 +181,10 @@ typedef struct
     size_t authority_id_len;
     size_t ca_index;
     bool cache_checkpoint;
+    bool has_witness_policy;
+    sm2_pki_transparency_witness_t
+        witnesses[SM2_PKI_TRANSPARENCY_MAX_WITNESSES];
+    sm2_pki_transparency_policy_t witness_policy;
 } sm2_pki_authority_profile_entry_t;
 
 struct sm2_pki_service_ctx_st

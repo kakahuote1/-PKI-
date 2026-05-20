@@ -295,6 +295,20 @@ static bool pki_client_should_cache_checkpoint(
     return profile->cache_checkpoint;
 }
 
+static const sm2_pki_transparency_policy_t *
+pki_client_witness_policy_for_authority(const sm2_pki_client_state_t *state,
+    const uint8_t *authority_id, size_t authority_id_len)
+{
+    const sm2_pki_authority_profile_entry_t *profile
+        = pki_client_find_authority_profile_const(
+            state, authority_id, authority_id_len);
+    if (profile && profile->has_witness_policy)
+        return &profile->witness_policy;
+    if (state && state->has_transparency_policy)
+        return &state->transparency_policy;
+    return NULL;
+}
+
 static sm2_pki_error_t pki_client_check_epoch_root_freshness(
     const sm2_pki_epoch_cache_entry_t *entry,
     const sm2_pki_epoch_root_record_t *root_record,
@@ -585,6 +599,26 @@ static void pki_client_cache_reset(sm2_pki_client_state_t *state)
     state->evidence_cache_counter = 0;
 }
 
+static void pki_client_cache_reset_authority(sm2_pki_client_state_t *state,
+    const uint8_t *authority_id, size_t authority_id_len)
+{
+    if (!state || !pki_client_authority_id_valid(authority_id, authority_id_len)
+        || !state->evidence_cache)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < state->evidence_cache_capacity; i++)
+    {
+        sm2_pki_verified_evidence_cache_entry_t *entry
+            = &state->evidence_cache[i];
+        if (!entry->used || entry->authority_id_len != authority_id_len)
+            continue;
+        if (memcmp(entry->authority_id, authority_id, authority_id_len) == 0)
+            memset(entry, 0, sizeof(*entry));
+    }
+}
+
 static void pki_client_cache_release(sm2_pki_client_state_t *state)
 {
     if (!state || !state->evidence_cache)
@@ -808,6 +842,22 @@ static void pki_client_epoch_cache_drop_checkpoints(
         state->epoch_root_cache[i].has_epoch_record = false;
         state->epoch_root_cache[i].witness_signature_count = 0;
     }
+}
+
+static void pki_client_epoch_cache_drop_authority_checkpoint(
+    sm2_pki_client_state_t *state, const uint8_t *authority_id,
+    size_t authority_id_len)
+{
+    if (!state
+        || !pki_client_authority_id_valid(authority_id, authority_id_len))
+        return;
+
+    sm2_pki_epoch_cache_entry_t *entry = pki_client_find_epoch_root_cache_entry(
+        state, authority_id, authority_id_len);
+    if (!entry)
+        return;
+    entry->has_epoch_record = false;
+    entry->witness_signature_count = 0;
 }
 
 static void pki_client_cache_u64_to_be(uint64_t v, uint8_t out[8])
@@ -2025,9 +2075,10 @@ sm2_ic_error_t sm2_pki_default_sync_policy_digest(
 
 static sm2_pki_error_t pki_client_check_epoch_policy_binding(
     sm2_pki_client_state_t *state,
-    const sm2_pki_epoch_root_record_t *root_record)
+    const sm2_pki_epoch_root_record_t *root_record,
+    const sm2_pki_transparency_policy_t *policy)
 {
-    if (!state || !root_record || !state->has_transparency_policy)
+    if (!state || !root_record || !policy)
         return SM2_PKI_ERR_VERIFY;
     if (root_record->witness_policy_version
             != SM2_PKI_DEFAULT_WITNESS_POLICY_VERSION
@@ -2042,8 +2093,8 @@ static sm2_pki_error_t pki_client_check_epoch_policy_binding(
 
     uint8_t witness_digest[SM2_PKI_POLICY_DIGEST_LEN];
     uint8_t sync_digest[SM2_PKI_POLICY_DIGEST_LEN];
-    sm2_ic_error_t ic_ret = sm2_pki_transparency_policy_digest(
-        &state->transparency_policy, witness_digest);
+    sm2_ic_error_t ic_ret
+        = sm2_pki_transparency_policy_digest(policy, witness_digest);
     if (ic_ret != SM2_IC_SUCCESS)
         return sm2_pki_error_from_ic(ic_ret);
     ic_ret = sm2_pki_default_sync_policy_digest(sync_digest);
@@ -2464,6 +2515,32 @@ sm2_pki_error_t sm2_pki_client_add_trusted_ca(
         sm2_auth_trust_store_add_ca(&state->trust_store, ca_public_key));
 }
 
+static sm2_pki_error_t pki_client_authority_profile_store_witness_policy(
+    sm2_pki_authority_profile_entry_t *entry,
+    const sm2_pki_transparency_policy_t *policy)
+{
+    if (!entry)
+        return SM2_PKI_ERR_PARAM;
+
+    memset(entry->witnesses, 0, sizeof(entry->witnesses));
+    memset(&entry->witness_policy, 0, sizeof(entry->witness_policy));
+    entry->has_witness_policy = false;
+    if (!policy)
+        return SM2_PKI_SUCCESS;
+
+    sm2_pki_error_t ret = pki_client_validate_transparency_policy(policy);
+    if (ret != SM2_PKI_SUCCESS)
+        return ret;
+
+    memcpy(entry->witnesses, policy->witnesses,
+        policy->witness_count * sizeof(entry->witnesses[0]));
+    entry->witness_policy.witnesses = entry->witnesses;
+    entry->witness_policy.witness_count = policy->witness_count;
+    entry->witness_policy.threshold = policy->threshold;
+    entry->has_witness_policy = true;
+    return SM2_PKI_SUCCESS;
+}
+
 sm2_pki_error_t sm2_pki_client_add_authority_profile(
     sm2_pki_client_ctx_t *ctx, const sm2_pki_authority_profile_t *profile)
 {
@@ -2477,6 +2554,18 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
     {
         pki_client_diag_set(state, SM2_PKI_DIAG_PARAM);
         return SM2_PKI_ERR_PARAM;
+    }
+    if (profile->has_witness_policy)
+    {
+        sm2_pki_error_t ret
+            = pki_client_validate_transparency_policy(&profile->witness_policy);
+        if (ret != SM2_PKI_SUCCESS)
+        {
+            pki_client_diag_set_authority(state,
+                SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH, profile->authority_id,
+                profile->authority_id_len);
+            return ret;
+        }
     }
 
     size_t ca_index = 0;
@@ -2504,6 +2593,15 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
             return SM2_PKI_ERR_VERIFY;
         }
         entry->cache_checkpoint = profile->cache_checkpoint;
+        sm2_pki_error_t ret
+            = pki_client_authority_profile_store_witness_policy(entry,
+                profile->has_witness_policy ? &profile->witness_policy : NULL);
+        if (ret != SM2_PKI_SUCCESS)
+            return ret;
+        pki_client_epoch_cache_drop_authority_checkpoint(
+            state, profile->authority_id, profile->authority_id_len);
+        pki_client_cache_reset_authority(
+            state, profile->authority_id, profile->authority_id_len);
         return SM2_PKI_SUCCESS;
     }
 
@@ -2518,7 +2616,19 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
         entry->authority_id_len = profile->authority_id_len;
         entry->ca_index = ca_index;
         entry->cache_checkpoint = profile->cache_checkpoint;
+        sm2_pki_error_t ret
+            = pki_client_authority_profile_store_witness_policy(entry,
+                profile->has_witness_policy ? &profile->witness_policy : NULL);
+        if (ret != SM2_PKI_SUCCESS)
+        {
+            memset(entry, 0, sizeof(*entry));
+            return ret;
+        }
         entry->used = true;
+        pki_client_epoch_cache_drop_authority_checkpoint(
+            state, profile->authority_id, profile->authority_id_len);
+        pki_client_cache_reset_authority(
+            state, profile->authority_id, profile->authority_id_len);
         return SM2_PKI_SUCCESS;
     }
 
@@ -2555,7 +2665,12 @@ static sm2_pki_error_t pki_client_validate_epoch_checkpoint(
 {
     if (!state || !checkpoint || !matched_ca_index)
         return SM2_PKI_ERR_PARAM;
-    if (!state->has_transparency_policy)
+
+    const sm2_pki_transparency_policy_t *policy
+        = pki_client_witness_policy_for_authority(state,
+            checkpoint->epoch_root_record.authority_id,
+            checkpoint->epoch_root_record.authority_id_len);
+    if (!policy)
     {
         pki_client_diag_set_authority(state,
             SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH,
@@ -2564,7 +2679,6 @@ static sm2_pki_error_t pki_client_validate_epoch_checkpoint(
         return SM2_PKI_ERR_VERIFY;
     }
 
-    const sm2_pki_transparency_policy_t *policy = &state->transparency_policy;
     sm2_pki_error_t ret = pki_client_validate_transparency_policy(policy);
     if (ret != SM2_PKI_SUCCESS)
     {
@@ -2581,7 +2695,7 @@ static sm2_pki_error_t pki_client_validate_epoch_checkpoint(
         return ret;
 
     ret = pki_client_check_epoch_policy_binding(
-        state, &checkpoint->epoch_root_record);
+        state, &checkpoint->epoch_root_record, policy);
     if (ret != SM2_PKI_SUCCESS)
         return ret;
 
@@ -3209,7 +3323,9 @@ sm2_pki_error_t sm2_pki_client_import_persisted_state(sm2_pki_client_ctx_t *ctx,
         if (ret != SM2_PKI_SUCCESS)
             return ret;
         checkpoint_ca_indices[i] = matched_ca_indices[i];
-        if (state->has_transparency_policy && record->has_checkpoint)
+        if (record->has_checkpoint
+            && pki_client_witness_policy_for_authority(
+                state, record->authority_id, record->authority_id_len))
         {
             ret = pki_client_validate_epoch_checkpoint(
                 state, &record->checkpoint, now_ts, &checkpoint_ca_indices[i]);
@@ -3271,7 +3387,9 @@ sm2_pki_error_t sm2_pki_client_import_persisted_state(sm2_pki_client_ctx_t *ctx,
             sizeof(entry->latest_issuance_root_hash));
         entry->has_issuance_root = true;
 
-        if (state->has_transparency_policy && record->has_checkpoint)
+        if (record->has_checkpoint
+            && pki_client_witness_policy_for_authority(
+                state, record->authority_id, record->authority_id_len))
         {
             sm2_pki_error_t ret = pki_client_accept_epoch_root_record(state,
                 &record->checkpoint.epoch_root_record, now_ts,
@@ -3952,19 +4070,6 @@ sm2_pki_error_t sm2_pki_verify(sm2_pki_client_ctx_t *ctx,
     }
     if (matched_ca_index)
         *matched_ca_index = local_matched_index;
-
-    if (!state->has_transparency_policy)
-    {
-        pki_client_diag_set(state, SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH);
-        return SM2_PKI_ERR_VERIFY;
-    }
-    const sm2_pki_transparency_policy_t *policy = &state->transparency_policy;
-    ret = pki_client_validate_transparency_policy(policy);
-    if (ret != SM2_PKI_SUCCESS)
-    {
-        pki_client_diag_set(state, SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH);
-        return SM2_PKI_ERR_VERIFY;
-    }
 
     return pki_client_verify_epoch_evidence_bundle(state, request->cert,
         request->evidence_bundle, now_ts, local_matched_index);

@@ -2804,6 +2804,120 @@ static void test_phase147_authority_profile_lightweight_checkpoint_cache()
     TEST_PASS();
 }
 
+static void test_phase148_authority_profile_witness_policy_scope()
+{
+    sm2_pki_service_ctx_t *service = NULL;
+    const uint8_t issuer[] = "P148_POLICY_CA";
+    const uint8_t signer_id[] = "P148_SIGNER";
+    uint64_t base_now = test_now_unix();
+    TEST_ASSERT(sm2_pki_service_create(
+                    &service, issuer, sizeof(issuer) - 1, 32, 300, base_now)
+            == SM2_PKI_SUCCESS,
+        "Service Init");
+    TEST_ASSERT(sm2_pki_identity_register(service, signer_id,
+                    sizeof(signer_id) - 1, SM2_KU_DIGITAL_SIGNATURE)
+            == SM2_PKI_SUCCESS,
+        "Signer Register");
+
+    sm2_ic_cert_result_t cert;
+    sm2_private_key_t temp;
+    sm2_ec_point_t ca_pub;
+    memset(&cert, 0, sizeof(cert));
+    memset(&temp, 0, sizeof(temp));
+    memset(&ca_pub, 0, sizeof(ca_pub));
+    TEST_ASSERT(
+        pki_issue_identity_cert(service, signer_id, sizeof(signer_id) - 1,
+            SM2_KU_DIGITAL_SIGNATURE, &cert, &temp),
+        "Issue Signer");
+    TEST_ASSERT(
+        sm2_pki_service_get_ca_public_key(service, &ca_pub) == SM2_PKI_SUCCESS,
+        "Get CA Pub");
+
+    sm2_pki_client_ctx_t *signer = NULL;
+    sm2_pki_client_ctx_t *verifier_scoped = NULL;
+    sm2_pki_client_ctx_t *verifier_wrong = NULL;
+    TEST_ASSERT(
+        sm2_pki_client_create(&signer, &ca_pub, service) == SM2_PKI_SUCCESS,
+        "Signer Init");
+    TEST_ASSERT(sm2_pki_client_import_cert(signer, &cert, &temp, &ca_pub)
+            == SM2_PKI_SUCCESS,
+        "Signer Import");
+    TEST_ASSERT(sm2_pki_client_create(&verifier_scoped, &ca_pub, NULL)
+            == SM2_PKI_SUCCESS,
+        "Scoped Verifier Init");
+    TEST_ASSERT(sm2_pki_client_create(&verifier_wrong, &ca_pub, NULL)
+            == SM2_PKI_SUCCESS,
+        "Wrong Policy Verifier Init");
+
+    TEST_ASSERT(pki_default_transparency_policy_init(), "Default Policy Init");
+    TEST_ASSERT(pki_add_authority_profile_with_policy(verifier_scoped, issuer,
+                    sizeof(issuer) - 1, &ca_pub, false,
+                    &g_pki_default_transparency_policy),
+        "Scoped Authority Witness Policy");
+
+    const uint8_t msg[] = "P148_AUTHORITY_WITNESS_POLICY";
+    uint64_t auth_now = test_cert_now(&cert.cert);
+    sm2_auth_signature_t sig;
+    sm2_pki_evidence_bundle_t bundle;
+    sm2_pki_verify_request_t request;
+    memset(&sig, 0, sizeof(sig));
+    memset(&bundle, 0, sizeof(bundle));
+    memset(&request, 0, sizeof(request));
+    TEST_ASSERT(pki_build_signed_verify_request(signer, msg, sizeof(msg) - 1,
+                    auth_now, &sig, &bundle, &request),
+        "Build Verify Request");
+
+    sm2_pki_epoch_checkpoint_t checkpoint;
+    memset(&checkpoint, 0, sizeof(checkpoint));
+    TEST_ASSERT(
+        pki_build_default_epoch_checkpoint(signer, &checkpoint), "Checkpoint");
+
+    TEST_ASSERT(sm2_pki_client_import_epoch_checkpoint(
+                    verifier_scoped, &checkpoint, auth_now)
+            == SM2_PKI_SUCCESS,
+        "Authority Policy Imports Checkpoint");
+    size_t matched = 0;
+    TEST_ASSERT(sm2_pki_verify(verifier_scoped, &request, auth_now, &matched)
+            == SM2_PKI_SUCCESS,
+        "Authority Policy Verifies Evidence Without Global Policy");
+
+    sm2_private_key_t alt_priv;
+    sm2_ec_point_t alt_pub;
+    sm2_pki_transparency_witness_t alt_witness;
+    memset(&alt_priv, 0, sizeof(alt_priv));
+    memset(&alt_pub, 0, sizeof(alt_pub));
+    memset(&alt_witness, 0, sizeof(alt_witness));
+    TEST_ASSERT(
+        test_generate_sm2_keypair(&alt_priv, &alt_pub), "Generate Alt Witness");
+    memcpy(alt_witness.witness_id, "P148_ALT_WIT", 12);
+    alt_witness.witness_id_len = 12;
+    alt_witness.key_version = SM2_PKI_WITNESS_KEY_DEFAULT_VERSION;
+    alt_witness.valid_from = 0;
+    alt_witness.valid_until = SM2_PKI_WITNESS_KEY_VALID_UNTIL_OPEN;
+    alt_witness.public_key = alt_pub;
+    sm2_pki_transparency_policy_t alt_policy = { &alt_witness, 1, 1 };
+    TEST_ASSERT(pki_add_authority_profile_with_policy(verifier_wrong, issuer,
+                    sizeof(issuer) - 1, &ca_pub, false, &alt_policy),
+        "Wrong Authority Witness Policy");
+    TEST_ASSERT(sm2_pki_client_import_epoch_checkpoint(
+                    verifier_wrong, &checkpoint, auth_now)
+            == SM2_PKI_ERR_VERIFY,
+        "Authority Witness Policy Digest Mismatch Reject");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(sm2_pki_client_get_last_diagnostic(verifier_wrong, &diag)
+            == SM2_PKI_SUCCESS,
+        "Read Witness Policy Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH,
+        "Witness Policy Diagnostic Reason");
+
+    sm2_pki_client_destroy(&verifier_wrong);
+    sm2_pki_client_destroy(&verifier_scoped);
+    sm2_pki_client_destroy(&signer);
+    sm2_pki_service_destroy(&service);
+    TEST_PASS();
+}
+
 static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
 {
     sm2_pki_service_ctx_t *service = NULL;

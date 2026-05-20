@@ -122,6 +122,8 @@ extern "C"
         size_t authority_id_len;
         sm2_ec_point_t ca_public_key;
         bool cache_checkpoint;
+        bool has_witness_policy;
+        sm2_pki_transparency_policy_t witness_policy;
     } sm2_pki_authority_profile_t;
 
 #define SM2_PKI_CLIENT_PERSISTED_STATE_VERSION 1U
@@ -222,10 +224,15 @@ extern "C"
     sm2_pki_error_t sm2_pki_client_add_trusted_ca(
         sm2_pki_client_ctx_t *ctx, const sm2_ec_point_t *ca_public_key);
 
+    /* Binds one authority to its CA and optional authority-scoped witness
+
+     * * policy. */
     sm2_pki_error_t sm2_pki_client_add_authority_profile(
         sm2_pki_client_ctx_t *ctx, const sm2_pki_authority_profile_t *profile);
 
-    /* Sets the verifier-side t-of-n witness policy required for verify. */
+    /* Sets the default verifier-side t-of-n witness policy for authorities
+
+     * * without their own profile policy. */
     sm2_pki_error_t sm2_pki_client_set_transparency_policy(
         sm2_pki_client_ctx_t *ctx, const sm2_pki_transparency_policy_t *policy);
 
