@@ -174,6 +174,14 @@ typedef struct
     uint64_t last_used_counter;
 } sm2_pki_verified_evidence_cache_entry_t;
 
+typedef struct
+{
+    bool used;
+    uint8_t authority_id[SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN];
+    size_t authority_id_len;
+    size_t ca_index;
+} sm2_pki_authority_profile_entry_t;
+
 struct sm2_pki_service_ctx_st
 {
     bool initialized;
@@ -224,6 +232,7 @@ struct sm2_pki_client_ctx_st
     bool has_identity_keys;
 
     sm2_auth_trust_store_t trust_store;
+    sm2_pki_authority_profile_entry_t authority_profiles[SM2_AUTH_MAX_CA_STORE];
     sm2_pki_service_state_t *revocation_service;
     sm2_pki_epoch_cache_entry_t epoch_root_cache[SM2_AUTH_MAX_CA_STORE];
     sm2_pki_verified_evidence_cache_entry_t *evidence_cache;

@@ -116,6 +116,13 @@ extern "C"
         uint64_t local_epoch_version;
     } sm2_pki_diagnostic_t;
 
+    typedef struct
+    {
+        uint8_t authority_id[SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN];
+        size_t authority_id_len;
+        sm2_ec_point_t ca_public_key;
+    } sm2_pki_authority_profile_t;
+
 #define SM2_PKI_CLIENT_PERSISTED_STATE_VERSION 1U
 #define SM2_PKI_CLIENT_PERSISTED_STATE_MAX_AUTHORITIES 16U
 #define SM2_PKI_CLIENT_PERSISTED_STORAGE_VERSION 1U
@@ -213,6 +220,9 @@ extern "C"
 
     sm2_pki_error_t sm2_pki_client_add_trusted_ca(
         sm2_pki_client_ctx_t *ctx, const sm2_ec_point_t *ca_public_key);
+
+    sm2_pki_error_t sm2_pki_client_add_authority_profile(
+        sm2_pki_client_ctx_t *ctx, const sm2_pki_authority_profile_t *profile);
 
     /* Sets the verifier-side t-of-n witness policy required for verify. */
     sm2_pki_error_t sm2_pki_client_set_transparency_policy(

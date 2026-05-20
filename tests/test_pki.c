@@ -220,6 +220,25 @@ static int pki_configure_default_transparency_policy(
         == SM2_PKI_SUCCESS;
 }
 
+static int pki_add_authority_profile(sm2_pki_client_ctx_t *client,
+    const uint8_t *authority_id, size_t authority_id_len,
+    const sm2_ec_point_t *ca_public_key)
+{
+    if (!client || !authority_id || authority_id_len == 0 || !ca_public_key
+        || authority_id_len > SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN)
+    {
+        return 0;
+    }
+
+    sm2_pki_authority_profile_t profile;
+    memset(&profile, 0, sizeof(profile));
+    memcpy(profile.authority_id, authority_id, authority_id_len);
+    profile.authority_id_len = authority_id_len;
+    profile.ca_public_key = *ca_public_key;
+    return sm2_pki_client_add_authority_profile(client, &profile)
+        == SM2_PKI_SUCCESS;
+}
+
 static int pki_bind_service_epoch_policy(
     sm2_pki_service_ctx_t *service, const sm2_pki_transparency_policy_t *policy)
 {

@@ -3230,6 +3230,18 @@ static void test_phase139_multi_ca_epoch_rejects_spoofed_authority()
     TEST_ASSERT(
         sm2_pki_client_add_trusted_ca(client, &ca_pub_b) == SM2_PKI_SUCCESS,
         "Add CA B");
+    TEST_ASSERT(pki_add_authority_profile(
+                    client, authority, sizeof(authority) - 1, &ca_pub_a),
+        "Profile Pins Authority To CA A");
+    sm2_pki_authority_profile_t conflicting_profile;
+    memset(&conflicting_profile, 0, sizeof(conflicting_profile));
+    memcpy(conflicting_profile.authority_id, authority, sizeof(authority) - 1);
+    conflicting_profile.authority_id_len = sizeof(authority) - 1;
+    conflicting_profile.ca_public_key = ca_pub_b;
+    TEST_ASSERT(
+        sm2_pki_client_add_authority_profile(client, &conflicting_profile)
+            == SM2_PKI_ERR_VERIFY,
+        "Conflicting Authority Profile Reject");
     TEST_ASSERT(sm2_pki_client_create(&signer_a, &ca_pub_a, service_a)
             == SM2_PKI_SUCCESS,
         "Signer A Init");
@@ -3263,13 +3275,23 @@ static void test_phase139_multi_ca_epoch_rejects_spoofed_authority()
             auth_now, &sig_b, &evidence_b, &request_b),
         "Build B Request");
     TEST_ASSERT(pki_import_epoch_checkpoint_from_signer(
+                    client, signer_b, auth_now, NULL)
+            == 0,
+        "Profile Rejects Same Authority From CA B Before Runtime Pin");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(
+        sm2_pki_client_get_last_diagnostic(client, &diag) == SM2_PKI_SUCCESS,
+        "Read Profile Pin Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_CA_PIN_MISMATCH,
+        "Profile Pin Diagnostic Reason");
+    TEST_ASSERT(pki_import_epoch_checkpoint_from_signer(
                     client, signer_a, auth_now, NULL),
         "Client Imports Authority A Checkpoint");
     TEST_ASSERT(pki_import_epoch_checkpoint_from_signer(
                     client, signer_b, auth_now, NULL)
             == 0,
         "Same Authority From CA B Checkpoint Reject");
-    sm2_pki_diagnostic_t diag;
     memset(&diag, 0, sizeof(diag));
     TEST_ASSERT(
         sm2_pki_client_get_last_diagnostic(client, &diag) == SM2_PKI_SUCCESS,

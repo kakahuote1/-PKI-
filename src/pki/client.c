@@ -31,6 +31,10 @@ typedef struct
 #define SM2_PKI_WITNESS_PAYLOAD_MAX 1024U
 #define SM2_PKI_SM3_BLOCK_LEN 64U
 
+static bool pki_client_find_trusted_ca_index(
+    const sm2_pki_client_state_t *state, const sm2_ec_point_t *ca_public_key,
+    size_t *matched_ca_index);
+
 static sm2_ic_error_t pki_client_root_record_verify_cb(void *user_ctx,
     const uint8_t *data, size_t data_len, const uint8_t *signature,
     size_t signature_len)
@@ -214,6 +218,69 @@ static sm2_pki_epoch_cache_entry_t *pki_client_ensure_epoch_root_cache_entry(
     }
 
     return NULL;
+}
+
+static sm2_pki_authority_profile_entry_t *pki_client_find_authority_profile(
+    sm2_pki_client_state_t *state, const uint8_t *authority_id,
+    size_t authority_id_len)
+{
+    if (!state
+        || !pki_client_authority_id_valid(authority_id, authority_id_len))
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SM2_AUTH_MAX_CA_STORE; i++)
+    {
+        sm2_pki_authority_profile_entry_t *entry
+            = &state->authority_profiles[i];
+        if (!entry->used || entry->authority_id_len != authority_id_len)
+            continue;
+        if (memcmp(entry->authority_id, authority_id, authority_id_len) == 0)
+            return entry;
+    }
+    return NULL;
+}
+
+static const sm2_pki_authority_profile_entry_t *
+pki_client_find_authority_profile_const(const sm2_pki_client_state_t *state,
+    const uint8_t *authority_id, size_t authority_id_len)
+{
+    if (!state
+        || !pki_client_authority_id_valid(authority_id, authority_id_len))
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SM2_AUTH_MAX_CA_STORE; i++)
+    {
+        const sm2_pki_authority_profile_entry_t *entry
+            = &state->authority_profiles[i];
+        if (!entry->used || entry->authority_id_len != authority_id_len)
+            continue;
+        if (memcmp(entry->authority_id, authority_id, authority_id_len) == 0)
+            return entry;
+    }
+    return NULL;
+}
+
+static sm2_pki_error_t pki_client_check_authority_profile_binding(
+    sm2_pki_client_state_t *state, const uint8_t *authority_id,
+    size_t authority_id_len, size_t matched_ca_index)
+{
+    const sm2_pki_authority_profile_entry_t *profile
+        = pki_client_find_authority_profile_const(
+            state, authority_id, authority_id_len);
+    if (!profile)
+        return SM2_PKI_SUCCESS;
+    if (profile->ca_index >= state->trust_store.count
+        || profile->ca_index != matched_ca_index)
+    {
+        pki_client_diag_set_ca(state, SM2_PKI_DIAG_CA_PIN_MISMATCH,
+            authority_id, authority_id_len, matched_ca_index);
+        return SM2_PKI_ERR_VERIFY;
+    }
+    return SM2_PKI_SUCCESS;
 }
 
 static sm2_pki_error_t pki_client_check_epoch_root_freshness(
@@ -458,6 +525,12 @@ static sm2_pki_error_t pki_client_match_epoch_root_ca(
             root_record, now_ts, pki_client_root_record_verify_cb, &verify_ctx);
         if (ic_ret == SM2_IC_SUCCESS)
         {
+            sm2_pki_error_t profile_ret
+                = pki_client_check_authority_profile_binding(state,
+                    root_record->authority_id, root_record->authority_id_len,
+                    i);
+            if (profile_ret != SM2_PKI_SUCCESS)
+                return profile_ret;
             *matched_ca_index = i;
             return SM2_PKI_SUCCESS;
         }
@@ -2376,6 +2449,65 @@ sm2_pki_error_t sm2_pki_client_add_trusted_ca(
         sm2_auth_trust_store_add_ca(&state->trust_store, ca_public_key));
 }
 
+sm2_pki_error_t sm2_pki_client_add_authority_profile(
+    sm2_pki_client_ctx_t *ctx, const sm2_pki_authority_profile_t *profile)
+{
+    sm2_pki_client_state_t *state = pki_client_state(ctx);
+    if (!ctx || !ctx->initialized || !state)
+        return SM2_PKI_ERR_PARAM;
+    pki_client_diag_clear(state);
+    if (!profile
+        || !pki_client_authority_id_valid(
+            profile->authority_id, profile->authority_id_len))
+    {
+        pki_client_diag_set(state, SM2_PKI_DIAG_PARAM);
+        return SM2_PKI_ERR_PARAM;
+    }
+
+    size_t ca_index = 0;
+    if (!pki_client_find_trusted_ca_index(
+            state, &profile->ca_public_key, &ca_index))
+    {
+        if (state->trust_store.count >= SM2_AUTH_MAX_CA_STORE)
+            return SM2_PKI_ERR_MEMORY;
+        ca_index = state->trust_store.count;
+        sm2_ic_error_t ic_ret = sm2_auth_trust_store_add_ca(
+            &state->trust_store, &profile->ca_public_key);
+        if (ic_ret != SM2_IC_SUCCESS)
+            return sm2_pki_error_from_ic(ic_ret);
+    }
+
+    sm2_pki_authority_profile_entry_t *entry
+        = pki_client_find_authority_profile(
+            state, profile->authority_id, profile->authority_id_len);
+    if (entry)
+    {
+        if (entry->ca_index != ca_index)
+        {
+            pki_client_diag_set_ca(state, SM2_PKI_DIAG_CA_PIN_MISMATCH,
+                profile->authority_id, profile->authority_id_len, ca_index);
+            return SM2_PKI_ERR_VERIFY;
+        }
+        return SM2_PKI_SUCCESS;
+    }
+
+    for (size_t i = 0; i < SM2_AUTH_MAX_CA_STORE; i++)
+    {
+        entry = &state->authority_profiles[i];
+        if (entry->used)
+            continue;
+        memset(entry, 0, sizeof(*entry));
+        memcpy(entry->authority_id, profile->authority_id,
+            profile->authority_id_len);
+        entry->authority_id_len = profile->authority_id_len;
+        entry->ca_index = ca_index;
+        entry->used = true;
+        return SM2_PKI_SUCCESS;
+    }
+
+    return SM2_PKI_ERR_MEMORY;
+}
+
 sm2_pki_error_t sm2_pki_client_set_transparency_policy(
     sm2_pki_client_ctx_t *ctx, const sm2_pki_transparency_policy_t *policy)
 {
@@ -3662,6 +3794,21 @@ sm2_pki_error_t sm2_pki_client_import_cert(sm2_pki_client_ctx_t *ctx,
     {
         pki_client_diag_set(state, SM2_PKI_DIAG_CERT_VERIFY_FAILED);
         return SM2_PKI_ERR_VERIFY;
+    }
+    size_t ca_index = 0;
+    if (pki_client_find_trusted_ca_index(state, ca_public_key, &ca_index))
+    {
+        const uint8_t *authority_id = NULL;
+        size_t authority_id_len = 0;
+        sm2_pki_error_t profile_ret = pki_client_expected_authority_from_cert(
+            &cert_result->cert, &authority_id, &authority_id_len);
+        if (profile_ret == SM2_PKI_SUCCESS)
+        {
+            profile_ret = pki_client_check_authority_profile_binding(
+                state, authority_id, authority_id_len, ca_index);
+            if (profile_ret != SM2_PKI_SUCCESS)
+                return profile_ret;
+        }
     }
 
     memset(&imported_private_key, 0, sizeof(imported_private_key));
