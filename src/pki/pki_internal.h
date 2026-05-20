@@ -236,6 +236,7 @@ struct sm2_pki_client_ctx_st
         transparency_witnesses[SM2_PKI_TRANSPARENCY_MAX_WITNESSES];
     sm2_pki_transparency_policy_t transparency_policy;
     bool has_transparency_policy;
+    sm2_pki_diagnostic_t last_diagnostic;
 
     sm2_auth_sign_pool_t sign_pool;
     bool sign_pool_enabled;

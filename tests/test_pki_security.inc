@@ -2029,6 +2029,13 @@ static void test_phase141_issuance_transparency_required_and_threshold()
     TEST_ASSERT(sm2_pki_verify(verifier, &request, auth_now, &matched)
             == SM2_PKI_ERR_VERIFY,
         "Missing Imported Checkpoint Reject");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(
+        sm2_pki_client_get_last_diagnostic(verifier, &diag) == SM2_PKI_SUCCESS,
+        "Read Missing Checkpoint Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_CHECKPOINT_MISSING,
+        "Missing Checkpoint Diagnostic Reason");
 
     sm2_pki_epoch_checkpoint_t default_checkpoint;
     TEST_ASSERT(pki_build_default_epoch_checkpoint(signer, &default_checkpoint),
@@ -2973,6 +2980,13 @@ static void test_phase144_evidence_bundle_standard_wire_sections()
     TEST_ASSERT(sm2_pki_verify(verifier, &request, auth_now, &matched)
             == SM2_PKI_ERR_VERIFY,
         "Wrong Evidence Authority Reject");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(
+        sm2_pki_client_get_last_diagnostic(verifier, &diag) == SM2_PKI_SUCCESS,
+        "Read Wrong Authority Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_AUTHORITY_MISMATCH,
+        "Wrong Authority Diagnostic Reason");
 
     wire[0] ^= 0x55U;
     memset(&decoded, 0, sizeof(decoded));
@@ -3255,6 +3269,13 @@ static void test_phase139_multi_ca_epoch_rejects_spoofed_authority()
                     client, signer_b, auth_now, NULL)
             == 0,
         "Same Authority From CA B Checkpoint Reject");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(
+        sm2_pki_client_get_last_diagnostic(client, &diag) == SM2_PKI_SUCCESS,
+        "Read Same Authority Checkpoint Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_CA_PIN_MISMATCH,
+        "Same Authority Checkpoint CA Pin Diagnostic");
 
     size_t matched = 0;
     TEST_ASSERT(sm2_pki_verify(client, &request_a, auth_now, &matched)
@@ -3263,6 +3284,12 @@ static void test_phase139_multi_ca_epoch_rejects_spoofed_authority()
     TEST_ASSERT(sm2_pki_verify(client, &request_b, auth_now, &matched)
             == SM2_PKI_ERR_VERIFY,
         "Same Authority From CA B Reject");
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(
+        sm2_pki_client_get_last_diagnostic(client, &diag) == SM2_PKI_SUCCESS,
+        "Read Same Authority Verify Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_CA_PIN_MISMATCH,
+        "Same Authority Verify CA Pin Diagnostic");
 
     sm2_pki_client_destroy(&signer_b);
     sm2_pki_client_destroy(&signer_a);

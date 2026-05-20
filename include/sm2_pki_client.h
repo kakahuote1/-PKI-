@@ -87,6 +87,35 @@ extern "C"
         sm2_pki_epoch_quorum_result_t quorum;
     } sm2_pki_edge_checkpoint_result_t;
 
+    typedef enum
+    {
+        SM2_PKI_DIAG_OK = 0,
+        SM2_PKI_DIAG_PARAM = 1,
+        SM2_PKI_DIAG_CERT_VERIFY_FAILED = 2,
+        SM2_PKI_DIAG_AUTHORITY_MISMATCH = 3,
+        SM2_PKI_DIAG_CHECKPOINT_MISSING = 4,
+        SM2_PKI_DIAG_CA_SIGNATURE_MISMATCH = 5,
+        SM2_PKI_DIAG_CA_PIN_MISMATCH = 6,
+        SM2_PKI_DIAG_ROOT_ROLLBACK = 7,
+        SM2_PKI_DIAG_ROOT_FORK = 8,
+        SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH = 9,
+        SM2_PKI_DIAG_WITNESS_THRESHOLD_MISSING = 10,
+        SM2_PKI_DIAG_EVIDENCE_BINDING_MISMATCH = 11
+    } sm2_pki_diagnostic_reason_t;
+
+    typedef struct
+    {
+        sm2_pki_diagnostic_reason_t reason;
+        uint8_t authority_id[SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN];
+        size_t authority_id_len;
+        bool has_ca_index;
+        size_t ca_index;
+        bool has_epoch_version;
+        uint64_t epoch_version;
+        bool has_local_epoch_version;
+        uint64_t local_epoch_version;
+    } sm2_pki_diagnostic_t;
+
 #define SM2_PKI_CLIENT_PERSISTED_STATE_VERSION 1U
 #define SM2_PKI_CLIENT_PERSISTED_STATE_MAX_AUTHORITIES 16U
 #define SM2_PKI_CLIENT_PERSISTED_STORAGE_VERSION 1U
@@ -247,6 +276,9 @@ extern "C"
 
     sm2_pki_error_t sm2_pki_client_get_evidence_cache_stats(
         const sm2_pki_client_ctx_t *ctx, sm2_pki_evidence_cache_stats_t *stats);
+
+    sm2_pki_error_t sm2_pki_client_get_last_diagnostic(
+        const sm2_pki_client_ctx_t *ctx, sm2_pki_diagnostic_t *diagnostic);
 
     bool sm2_pki_client_is_sign_pool_enabled(const sm2_pki_client_ctx_t *ctx);
 
