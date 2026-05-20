@@ -121,6 +121,7 @@ extern "C"
         uint8_t authority_id[SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN];
         size_t authority_id_len;
         sm2_ec_point_t ca_public_key;
+        bool cache_checkpoint;
     } sm2_pki_authority_profile_t;
 
 #define SM2_PKI_CLIENT_PERSISTED_STATE_VERSION 1U

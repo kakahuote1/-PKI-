@@ -283,6 +283,18 @@ static sm2_pki_error_t pki_client_check_authority_profile_binding(
     return SM2_PKI_SUCCESS;
 }
 
+static bool pki_client_should_cache_checkpoint(
+    const sm2_pki_client_state_t *state, const uint8_t *authority_id,
+    size_t authority_id_len)
+{
+    const sm2_pki_authority_profile_entry_t *profile
+        = pki_client_find_authority_profile_const(
+            state, authority_id, authority_id_len);
+    if (!profile)
+        return true;
+    return profile->cache_checkpoint;
+}
+
 static sm2_pki_error_t pki_client_check_epoch_root_freshness(
     const sm2_pki_epoch_cache_entry_t *entry,
     const sm2_pki_epoch_root_record_t *root_record,
@@ -477,12 +489,15 @@ static sm2_pki_error_t pki_client_accept_epoch_root_record(
 
     entry->epoch_record = *root_record;
     memset(entry->witness_signatures, 0, sizeof(entry->witness_signatures));
-    if (witness_signature_count > 0)
+    bool cache_checkpoint = pki_client_should_cache_checkpoint(
+        state, root_record->authority_id, root_record->authority_id_len);
+    if (cache_checkpoint && witness_signature_count > 0)
     {
         memcpy(entry->witness_signatures, witness_signatures,
             witness_signature_count * sizeof(entry->witness_signatures[0]));
     }
-    entry->witness_signature_count = witness_signature_count;
+    entry->witness_signature_count
+        = cache_checkpoint ? witness_signature_count : 0;
     memcpy(entry->epoch_digest, epoch_digest, sizeof(entry->epoch_digest));
     entry->used = true;
     entry->has_epoch_record = true;
@@ -2488,6 +2503,7 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
                 profile->authority_id, profile->authority_id_len, ca_index);
             return SM2_PKI_ERR_VERIFY;
         }
+        entry->cache_checkpoint = profile->cache_checkpoint;
         return SM2_PKI_SUCCESS;
     }
 
@@ -2501,6 +2517,7 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
             profile->authority_id_len);
         entry->authority_id_len = profile->authority_id_len;
         entry->ca_index = ca_index;
+        entry->cache_checkpoint = profile->cache_checkpoint;
         entry->used = true;
         return SM2_PKI_SUCCESS;
     }

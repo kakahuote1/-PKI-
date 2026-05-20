@@ -180,6 +180,7 @@ typedef struct
     uint8_t authority_id[SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN];
     size_t authority_id_len;
     size_t ca_index;
+    bool cache_checkpoint;
 } sm2_pki_authority_profile_entry_t;
 
 struct sm2_pki_service_ctx_st

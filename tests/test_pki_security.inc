@@ -2682,6 +2682,128 @@ static void test_phase146_edge_checkpoint_quorum_product_flow()
     TEST_PASS();
 }
 
+static void test_phase147_authority_profile_lightweight_checkpoint_cache()
+{
+    sm2_pki_service_ctx_t *service = NULL;
+    const uint8_t issuer[] = "P147_LIGHT_CA";
+    const uint8_t signer_id[] = "P147_SIGNER";
+    uint64_t base_now = test_now_unix();
+    TEST_ASSERT(sm2_pki_service_create(
+                    &service, issuer, sizeof(issuer) - 1, 32, 300, base_now)
+            == SM2_PKI_SUCCESS,
+        "Service Init");
+    TEST_ASSERT(sm2_pki_identity_register(service, signer_id,
+                    sizeof(signer_id) - 1, SM2_KU_DIGITAL_SIGNATURE)
+            == SM2_PKI_SUCCESS,
+        "Signer Register");
+
+    sm2_ic_cert_result_t cert;
+    sm2_private_key_t temp;
+    sm2_ec_point_t ca_pub;
+    memset(&cert, 0, sizeof(cert));
+    memset(&temp, 0, sizeof(temp));
+    memset(&ca_pub, 0, sizeof(ca_pub));
+    TEST_ASSERT(
+        pki_issue_identity_cert(service, signer_id, sizeof(signer_id) - 1,
+            SM2_KU_DIGITAL_SIGNATURE, &cert, &temp),
+        "Issue Signer");
+    TEST_ASSERT(
+        sm2_pki_service_get_ca_public_key(service, &ca_pub) == SM2_PKI_SUCCESS,
+        "Get CA Pub");
+
+    sm2_pki_client_ctx_t *signer = NULL;
+    sm2_pki_client_ctx_t *verifier_min = NULL;
+    sm2_pki_client_ctx_t *verifier_full = NULL;
+    TEST_ASSERT(
+        sm2_pki_client_create(&signer, &ca_pub, service) == SM2_PKI_SUCCESS,
+        "Signer Init");
+    TEST_ASSERT(sm2_pki_client_import_cert(signer, &cert, &temp, &ca_pub)
+            == SM2_PKI_SUCCESS,
+        "Signer Import");
+    TEST_ASSERT(
+        sm2_pki_client_create(&verifier_min, &ca_pub, NULL) == SM2_PKI_SUCCESS,
+        "Verifier Min Init");
+    TEST_ASSERT(
+        sm2_pki_client_create(&verifier_full, &ca_pub, NULL) == SM2_PKI_SUCCESS,
+        "Verifier Full Init");
+    TEST_ASSERT(pki_configure_default_transparency_policy(verifier_min),
+        "Verifier Min Witness Policy");
+    TEST_ASSERT(pki_configure_default_transparency_policy(verifier_full),
+        "Verifier Full Witness Policy");
+    TEST_ASSERT(pki_add_authority_profile_with_checkpoint_cache(
+                    verifier_min, issuer, sizeof(issuer) - 1, &ca_pub, false),
+        "Verifier Min Authority Profile");
+    TEST_ASSERT(pki_add_authority_profile_with_checkpoint_cache(
+                    verifier_full, issuer, sizeof(issuer) - 1, &ca_pub, true),
+        "Verifier Full Authority Profile");
+
+    const uint8_t msg[] = "P147_LIGHTWEIGHT_CHECKPOINT";
+    uint64_t auth_now = test_cert_now(&cert.cert);
+    sm2_auth_signature_t sig;
+    sm2_pki_evidence_bundle_t bundle;
+    sm2_pki_verify_request_t request;
+    memset(&sig, 0, sizeof(sig));
+    memset(&bundle, 0, sizeof(bundle));
+    memset(&request, 0, sizeof(request));
+    TEST_ASSERT(pki_build_signed_verify_request(signer, msg, sizeof(msg) - 1,
+                    auth_now, &sig, &bundle, &request),
+        "Build Verify Request");
+
+    sm2_pki_epoch_checkpoint_t checkpoint;
+    memset(&checkpoint, 0, sizeof(checkpoint));
+    TEST_ASSERT(
+        pki_build_default_epoch_checkpoint(signer, &checkpoint), "Checkpoint");
+
+    TEST_ASSERT(sm2_pki_client_import_epoch_checkpoint(
+                    verifier_min, &checkpoint, auth_now)
+            == SM2_PKI_SUCCESS,
+        "Import Minimal Checkpoint");
+    size_t matched = 0;
+    TEST_ASSERT(sm2_pki_verify(verifier_min, &request, auth_now, &matched)
+            == SM2_PKI_SUCCESS,
+        "Minimal Root State Verifies Evidence");
+    sm2_pki_epoch_checkpoint_t exported_checkpoint;
+    memset(&exported_checkpoint, 0, sizeof(exported_checkpoint));
+    TEST_ASSERT(sm2_pki_client_export_epoch_checkpoint(verifier_min, issuer,
+                    sizeof(issuer) - 1, &exported_checkpoint)
+            == SM2_PKI_ERR_NOT_FOUND,
+        "Minimal Profile Does Not Retain Full Checkpoint");
+    sm2_pki_client_persisted_state_t persisted_min;
+    memset(&persisted_min, 0, sizeof(persisted_min));
+    TEST_ASSERT(
+        sm2_pki_client_export_persisted_state(verifier_min, &persisted_min)
+            == SM2_PKI_SUCCESS,
+        "Export Minimal Persisted State");
+    TEST_ASSERT(persisted_min.record_count == 1
+            && !persisted_min.records[0].has_checkpoint,
+        "Minimal Persisted State Omits Checkpoint");
+
+    TEST_ASSERT(sm2_pki_client_import_epoch_checkpoint(
+                    verifier_full, &checkpoint, auth_now)
+            == SM2_PKI_SUCCESS,
+        "Import Full Checkpoint");
+    memset(&exported_checkpoint, 0, sizeof(exported_checkpoint));
+    TEST_ASSERT(sm2_pki_client_export_epoch_checkpoint(verifier_full, issuer,
+                    sizeof(issuer) - 1, &exported_checkpoint)
+            == SM2_PKI_SUCCESS,
+        "Full Profile Retains Checkpoint");
+    sm2_pki_client_persisted_state_t persisted_full;
+    memset(&persisted_full, 0, sizeof(persisted_full));
+    TEST_ASSERT(
+        sm2_pki_client_export_persisted_state(verifier_full, &persisted_full)
+            == SM2_PKI_SUCCESS,
+        "Export Full Persisted State");
+    TEST_ASSERT(persisted_full.record_count == 1
+            && persisted_full.records[0].has_checkpoint,
+        "Full Persisted State Includes Checkpoint");
+
+    sm2_pki_client_destroy(&verifier_full);
+    sm2_pki_client_destroy(&verifier_min);
+    sm2_pki_client_destroy(&signer);
+    sm2_pki_service_destroy(&service);
+    TEST_PASS();
+}
+
 static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
 {
     sm2_pki_service_ctx_t *service = NULL;
