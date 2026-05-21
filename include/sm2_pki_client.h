@@ -278,10 +278,15 @@ extern "C"
         const sm2_pki_client_persisted_state_t *state,
         const uint8_t *device_secret, size_t device_secret_len);
 
+    /* Loads newest slot. */
+    /* minimum_sequence_floor is caller-owned. */
+    /* Keep it outside rollbackable storage. */
+    /* Pass 0 when no such anchor exists. */
     sm2_pki_error_t sm2_pki_client_persisted_storage_load(
         const sm2_pki_client_persisted_storage_t *storage,
         sm2_pki_client_persisted_state_t *state, const uint8_t *device_secret,
-        size_t device_secret_len, uint64_t *selected_sequence);
+        size_t device_secret_len, uint64_t minimum_sequence_floor,
+        uint64_t *selected_sequence);
 
     sm2_pki_error_t sm2_pki_client_get_cert(
         const sm2_pki_client_ctx_t *ctx, const sm2_implicit_cert_t **cert);
