@@ -579,21 +579,29 @@ static void test_auth_aead_integrity()
             "AEAD Decrypt Short Tag Reject");
 
         cipher[0] ^= 0x80;
+        memset(recover, 0xA5, sizeof(recover));
         recover_len = sizeof(recover);
         TEST_ASSERT(sm2_auth_decrypt(modes[i], key, iv, sizeof(iv), aad,
                         sizeof(aad) - 1, cipher, cipher_len, tag, tag_len,
                         recover, &recover_len)
                 == SM2_IC_ERR_VERIFY,
             "AEAD Tampered Cipher Reject");
+        TEST_ASSERT(recover_len == 0, "AEAD Tampered Cipher Clears Len");
+        for (size_t j = 0; j < sizeof(recover); j++)
+            TEST_ASSERT(recover[j] == 0, "AEAD Tampered Cipher Clears Output");
         cipher[0] ^= 0x80;
 
         tag[0] ^= 0x5A;
+        memset(recover, 0xA5, sizeof(recover));
         recover_len = sizeof(recover);
         TEST_ASSERT(sm2_auth_decrypt(modes[i], key, iv, sizeof(iv), aad,
                         sizeof(aad) - 1, cipher, cipher_len, tag, tag_len,
                         recover, &recover_len)
                 == SM2_IC_ERR_VERIFY,
             "AEAD Tampered Tag Reject");
+        TEST_ASSERT(recover_len == 0, "AEAD Tampered Tag Clears Len");
+        for (size_t j = 0; j < sizeof(recover); j++)
+            TEST_ASSERT(recover[j] == 0, "AEAD Tampered Tag Clears Output");
     }
 
     TEST_PASS();

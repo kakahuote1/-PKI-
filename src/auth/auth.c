@@ -1427,6 +1427,7 @@ sm2_ic_error_t sm2_auth_decrypt(sm2_auth_aead_mode_t mode,
         return SM2_IC_ERR_PARAM;
     if (*plaintext_len < ciphertext_len)
         return SM2_IC_ERR_MEMORY;
+    size_t plaintext_cap = *plaintext_len;
 
     int iv_len_i = 0;
     int aad_len_i = 0;
@@ -1498,7 +1499,11 @@ sm2_ic_error_t sm2_auth_decrypt(sm2_auth_aead_mode_t mode,
     EVP_CIPHER_CTX_free(ctx);
     utils_aead_cipher_free(cipher);
     if (ok != 1)
+    {
+        sm2_secure_memzero(plaintext, plaintext_cap);
+        *plaintext_len = 0;
         return SM2_IC_ERR_VERIFY;
+    }
 
     *plaintext_len = (size_t)total;
     return SM2_IC_SUCCESS;
