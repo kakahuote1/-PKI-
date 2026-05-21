@@ -47,6 +47,36 @@ add_executable(sm2_bench_network_overhead src/app/bench_network_overhead.c)
 target_link_libraries(sm2_bench_network_overhead PRIVATE tinypki)
 
 add_executable(sm2_bench_capability_suite src/app/bench_capability_suite.c)
+find_package(Git QUIET)
+set(TINYPKI_GIT_COMMIT "unknown")
+set(TINYPKI_GIT_DIRTY "0")
+if (GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE TINYPKI_GIT_COMMIT
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE TINYPKI_GIT_STATUS
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif ()
+if (NOT TINYPKI_GIT_COMMIT)
+    set(TINYPKI_GIT_COMMIT "unknown")
+endif ()
+if (TINYPKI_GIT_STATUS)
+    set(TINYPKI_GIT_DIRTY "1")
+endif ()
+target_compile_definitions(
+    sm2_bench_capability_suite
+    PRIVATE BENCH_GIT_COMMIT="${TINYPKI_GIT_COMMIT}"
+            BENCH_GIT_DIRTY=${TINYPKI_GIT_DIRTY}
+)
 target_link_libraries(sm2_bench_capability_suite PRIVATE tinypki)
 if (NOT MSVC)
     target_link_libraries(sm2_bench_capability_suite PRIVATE m)

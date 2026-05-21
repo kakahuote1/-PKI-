@@ -15,6 +15,16 @@ internal_doc/
 # Optional local IDE settings
 .vscode/
 .idea/
+/*.code-workspace
+
+# Local agent/workflow notes
+/AGENTS.md
+
+# Accidental CLI help captures
+/--help
+/--help.md
+/--json
+/--json.md
 
 # OS / debug artifacts
 *.dSYM/

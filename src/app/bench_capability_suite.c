@@ -33,15 +33,27 @@
 #include "../revoke/revoke_internal.h"
 
 #define BENCH_ROUNDS 21U
+#define BENCH_WARMUP_ROUNDS 3U
+#define BENCH_REPRO_SEED 20260520ULL
+#define BENCH_STABLE_MAX_REL_STDDEV 0.50
+#define BENCH_STABLE_MAX_P95_TO_MEDIAN 3.00
 #define BENCH_BASELINE_X509_BITS 2048
 #define BENCH_BASELINE_CRL_ENTRIES 2048U
 #define BENCH_SCALE_TOTAL_CERTS 1048576U
 #define BENCH_SCALE_REVOKED_CERTS 32768U
 #define BENCH_SCALE_QUERY_COUNT 4096U
-#define BENCH_SCALE_PROVE_ROUNDS 1U
+#define BENCH_SCALE_PROVE_ROUNDS 5U
 #define BENCH_CRLITE_MAX_LEVELS 4U
 #define BENCH_CRLITE_FP_RATE 0.01
 #define BENCH_CRLITE_DELTA_FRACTION 0.05
+
+#ifndef BENCH_GIT_COMMIT
+#define BENCH_GIT_COMMIT "unknown"
+#endif
+
+#ifndef BENCH_GIT_DIRTY
+#define BENCH_GIT_DIRTY 0
+#endif
 
 static int bench_output_path_is_safe(const char *path)
 {
@@ -62,6 +74,20 @@ static int bench_output_path_is_safe(const char *path)
         path += 2;
     return strncmp(path, "tmp/", 4) == 0 || strncmp(path, "tmp\\", 4) == 0;
 }
+
+typedef struct
+{
+    size_t sample_count;
+    double min_ms;
+    double median_ms;
+    double p95_ms;
+    double max_ms;
+    double mean_ms;
+    double stddev_ms;
+    double rel_stddev;
+    double p95_to_median;
+    int stable;
+} bench_timing_stats_t;
 typedef struct
 {
     size_t cert_bytes;
@@ -79,6 +105,9 @@ typedef struct
     double export_epoch_evidence_ms;
     double witness_sign_ms;
     double verify_epoch_bundle_ms;
+    bench_timing_stats_t export_epoch_evidence_stats;
+    bench_timing_stats_t witness_sign_stats;
+    bench_timing_stats_t verify_epoch_bundle_stats;
 } capability_timing_metrics_t;
 
 typedef struct
@@ -86,11 +115,18 @@ typedef struct
     size_t x509_cert_bytes;
     size_t crl_entry_count;
     size_t crl_der_bytes;
+    size_t scale_crl_entry_count;
+    size_t scale_crl_der_bytes;
+    size_t crl_delta_bytes;
     size_t ocsp_request_bytes;
     size_t ocsp_response_bytes;
     size_t ocsp_wire_bytes;
     double crl_verify_lookup_ms;
+    double scale_crl_verify_lookup_ms;
     double ocsp_verify_ms;
+    bench_timing_stats_t crl_verify_lookup_stats;
+    bench_timing_stats_t scale_crl_verify_lookup_stats;
+    bench_timing_stats_t ocsp_verify_stats;
 } openssl_revocation_metrics_t;
 
 typedef struct
@@ -104,6 +140,8 @@ typedef struct
     size_t repaired_false_positive_count;
     size_t query_error_count;
     double lookup_ms;
+    double lookup_per_query_us;
+    bench_timing_stats_t lookup_stats;
 } crlite_metrics_t;
 
 typedef struct
@@ -114,6 +152,8 @@ typedef struct
     size_t verifier_cache_bytes;
     double prove_absence_ms;
     double verify_absence_ms;
+    bench_timing_stats_t prove_absence_stats;
+    bench_timing_stats_t verify_absence_stats;
 } tinypki_revocation_scale_metrics_t;
 
 typedef struct
@@ -175,14 +215,96 @@ static int cmp_double_asc(const void *lhs, const void *rhs)
     return 0;
 }
 
-static double median_ms(double *samples, size_t count)
+static int timing_stats_from_samples(
+    double *samples, size_t count, bench_timing_stats_t *stats)
 {
-    if (!samples || count == 0)
-        return 0.0;
+    double sum = 0.0;
+    double variance = 0.0;
+    size_t p95_index;
+
+    if (!samples || count == 0U || !stats)
+        return 0;
+
+    memset(stats, 0, sizeof(*stats));
+    for (size_t i = 0; i < count; i++)
+    {
+        if (samples[i] < 0.0)
+            return 0;
+        sum += samples[i];
+    }
+
     qsort(samples, count, sizeof(samples[0]), cmp_double_asc);
+    stats->sample_count = count;
+    stats->min_ms = samples[0];
+    stats->max_ms = samples[count - 1U];
+    stats->mean_ms = sum / (double)count;
     if ((count & 1U) != 0U)
-        return samples[count / 2U];
-    return (samples[(count / 2U) - 1U] + samples[count / 2U]) / 2.0;
+        stats->median_ms = samples[count / 2U];
+    else
+        stats->median_ms
+            = (samples[(count / 2U) - 1U] + samples[count / 2U]) / 2.0;
+
+    p95_index = (size_t)ceil((double)count * 0.95);
+    if (p95_index == 0U)
+        p95_index = 1U;
+    if (p95_index > count)
+        p95_index = count;
+    stats->p95_ms = samples[p95_index - 1U];
+
+    for (size_t i = 0; i < count; i++)
+    {
+        double delta = samples[i] - stats->mean_ms;
+        variance += delta * delta;
+    }
+    stats->stddev_ms = sqrt(variance / (double)count);
+    stats->rel_stddev
+        = stats->mean_ms > 0.0 ? stats->stddev_ms / stats->mean_ms : 0.0;
+    stats->p95_to_median
+        = stats->median_ms > 0.0 ? stats->p95_ms / stats->median_ms : 0.0;
+    stats->stable = count >= 5U
+        && stats->rel_stddev <= BENCH_STABLE_MAX_REL_STDDEV
+        && stats->p95_to_median <= BENCH_STABLE_MAX_P95_TO_MEDIAN;
+    return 1;
+}
+
+static const char *bench_bool_json(int value)
+{
+    return value ? "true" : "false";
+}
+
+static const char *bench_os_name(void)
+{
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return "unknown";
+#endif
+}
+
+static const char *bench_compiler_name(void)
+{
+#if defined(__clang__)
+    return "clang";
+#elif defined(__GNUC__)
+    return "gcc";
+#elif defined(_MSC_VER)
+    return "msvc";
+#else
+    return "unknown";
+#endif
+}
+
+static const char *bench_build_mode(void)
+{
+#if defined(NDEBUG)
+    return "release";
+#else
+    return "debug";
+#endif
 }
 
 static uint64_t current_unix_ts(void)
@@ -523,13 +645,13 @@ cleanup:
     return *out_request && *out_response;
 }
 
-static int measure_crl_verify_lookup(
-    X509_CRL *crl, EVP_PKEY *ca_key, long lookup_serial, double *out_median_ms)
+static int measure_crl_verify_lookup(X509_CRL *crl, EVP_PKEY *ca_key,
+    long lookup_serial, double *out_median_ms, bench_timing_stats_t *out_stats)
 {
     double samples[BENCH_ROUNDS];
     ASN1_INTEGER *serial = NULL;
 
-    if (!crl || !ca_key || !out_median_ms)
+    if (!crl || !ca_key || !out_median_ms || !out_stats)
         return 0;
     memset(samples, 0, sizeof(samples));
 
@@ -540,7 +662,7 @@ static int measure_crl_verify_lookup(
         return 0;
     }
 
-    for (size_t i = 0; i < BENCH_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; i++)
     {
         X509_REVOKED *revoked = NULL;
         double t0 = now_ms_highres();
@@ -550,21 +672,24 @@ static int measure_crl_verify_lookup(
             ASN1_INTEGER_free(serial);
             return 0;
         }
-        samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
 
     ASN1_INTEGER_free(serial);
-    *out_median_ms = median_ms(samples, BENCH_ROUNDS);
+    if (!timing_stats_from_samples(samples, BENCH_ROUNDS, out_stats))
+        return 0;
+    *out_median_ms = out_stats->median_ms;
     return *out_median_ms > 0.0;
 }
 
 static int measure_ocsp_verify(OCSP_RESPONSE *response, X509 *ca_cert,
-    X509 *leaf_cert, double *out_median_ms)
+    X509 *leaf_cert, double *out_median_ms, bench_timing_stats_t *out_stats)
 {
     X509_STORE *store = NULL;
     double samples[BENCH_ROUNDS];
 
-    if (!response || !ca_cert || !leaf_cert || !out_median_ms)
+    if (!response || !ca_cert || !leaf_cert || !out_median_ms || !out_stats)
         return 0;
     memset(samples, 0, sizeof(samples));
 
@@ -575,7 +700,7 @@ static int measure_ocsp_verify(OCSP_RESPONSE *response, X509 *ca_cert,
         return 0;
     }
 
-    for (size_t i = 0; i < BENCH_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; i++)
     {
         OCSP_BASICRESP *basic = NULL;
         OCSP_CERTID *cid = NULL;
@@ -606,13 +731,16 @@ static int measure_ocsp_verify(OCSP_RESPONSE *response, X509 *ca_cert,
             return 0;
         }
 
-        samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
         OCSP_BASICRESP_free(basic);
         OCSP_CERTID_free(cid);
     }
 
     X509_STORE_free(store);
-    *out_median_ms = median_ms(samples, BENCH_ROUNDS);
+    if (!timing_stats_from_samples(samples, BENCH_ROUNDS, out_stats))
+        return 0;
+    *out_median_ms = out_stats->median_ms;
     return *out_median_ms > 0.0;
 }
 
@@ -624,6 +752,7 @@ static int collect_openssl_revocation_metrics(
     X509 *ca_cert = NULL;
     X509 *leaf_cert = NULL;
     X509_CRL *crl = NULL;
+    X509_CRL *scale_crl = NULL;
     OCSP_REQUEST *ocsp_request = NULL;
     OCSP_RESPONSE *ocsp_response = NULL;
     const long leaf_serial = 2000L;
@@ -640,6 +769,9 @@ static int collect_openssl_revocation_metrics(
         || !create_leaf_cert(leaf_key, ca_cert, ca_key, leaf_serial, &leaf_cert)
         || !build_signed_crl(ca_cert, ca_key, leaf_serial,
             BENCH_BASELINE_CRL_ENTRIES, &crl, &metrics->crl_der_bytes)
+        || !build_signed_crl(ca_cert, ca_key, leaf_serial,
+            BENCH_SCALE_REVOKED_CERTS, &scale_crl,
+            &metrics->scale_crl_der_bytes)
         || !build_ocsp_artifacts(ca_cert, ca_key, leaf_cert, &ocsp_request,
             &ocsp_response, &metrics->ocsp_request_bytes,
             &metrics->ocsp_response_bytes))
@@ -652,22 +784,29 @@ static int collect_openssl_revocation_metrics(
         goto cleanup;
     metrics->x509_cert_bytes = (size_t)x509_der_len;
     metrics->crl_entry_count = BENCH_BASELINE_CRL_ENTRIES;
+    metrics->scale_crl_entry_count = BENCH_SCALE_REVOKED_CERTS;
+    metrics->crl_delta_bytes = (size_t)ceil(
+        (double)metrics->scale_crl_der_bytes * BENCH_CRLITE_DELTA_FRACTION);
     metrics->ocsp_wire_bytes
         = metrics->ocsp_request_bytes + metrics->ocsp_response_bytes;
 
-    if (!measure_crl_verify_lookup(
-            crl, ca_key, leaf_serial, &metrics->crl_verify_lookup_ms)
-        || !measure_ocsp_verify(
-            ocsp_response, ca_cert, leaf_cert, &metrics->ocsp_verify_ms))
+    if (!measure_crl_verify_lookup(crl, ca_key, leaf_serial,
+            &metrics->crl_verify_lookup_ms, &metrics->crl_verify_lookup_stats)
+        || !measure_crl_verify_lookup(scale_crl, ca_key, leaf_serial,
+            &metrics->scale_crl_verify_lookup_ms,
+            &metrics->scale_crl_verify_lookup_stats)
+        || !measure_ocsp_verify(ocsp_response, ca_cert, leaf_cert,
+            &metrics->ocsp_verify_ms, &metrics->ocsp_verify_stats))
     {
         goto cleanup;
     }
 
     ok = metrics->x509_cert_bytes > 0U && metrics->crl_der_bytes > 0U
-        && metrics->ocsp_wire_bytes > 0U;
+        && metrics->scale_crl_der_bytes > 0U && metrics->ocsp_wire_bytes > 0U;
 
 cleanup:
     X509_CRL_free(crl);
+    X509_CRL_free(scale_crl);
     OCSP_REQUEST_free(ocsp_request);
     OCSP_RESPONSE_free(ocsp_response);
     X509_free(ca_cert);
@@ -986,7 +1125,7 @@ static int collect_timing_metrics(
         return 0;
     memset(metrics, 0, sizeof(*metrics));
 
-    for (size_t i = 0; i < BENCH_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; i++)
     {
         sm2_pki_evidence_bundle_t evidence;
         double t0 = now_ms_highres();
@@ -996,10 +1135,11 @@ static int collect_timing_metrics(
         {
             return 0;
         }
-        export_samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            export_samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
 
-    for (size_t i = 0; i < BENCH_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; i++)
     {
         double t0 = now_ms_highres();
         sm2_pki_epoch_checkpoint_t saved_checkpoint = ctx->checkpoint;
@@ -1008,10 +1148,11 @@ static int collect_timing_metrics(
             return 0;
         }
         ctx->checkpoint = saved_checkpoint;
-        witness_samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            witness_samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
 
-    for (size_t i = 0; i < BENCH_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; i++)
     {
         size_t matched = 0;
         double t0 = now_ms_highres();
@@ -1021,12 +1162,24 @@ static int collect_timing_metrics(
         {
             return 0;
         }
-        verify_samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            verify_samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
 
-    metrics->export_epoch_evidence_ms = median_ms(export_samples, BENCH_ROUNDS);
-    metrics->witness_sign_ms = median_ms(witness_samples, BENCH_ROUNDS);
-    metrics->verify_epoch_bundle_ms = median_ms(verify_samples, BENCH_ROUNDS);
+    if (!timing_stats_from_samples(
+            export_samples, BENCH_ROUNDS, &metrics->export_epoch_evidence_stats)
+        || !timing_stats_from_samples(
+            witness_samples, BENCH_ROUNDS, &metrics->witness_sign_stats)
+        || !timing_stats_from_samples(
+            verify_samples, BENCH_ROUNDS, &metrics->verify_epoch_bundle_stats))
+    {
+        return 0;
+    }
+    metrics->export_epoch_evidence_ms
+        = metrics->export_epoch_evidence_stats.median_ms;
+    metrics->witness_sign_ms = metrics->witness_sign_stats.median_ms;
+    metrics->verify_epoch_bundle_ms
+        = metrics->verify_epoch_bundle_stats.median_ms;
     return 1;
 }
 
@@ -1224,25 +1377,27 @@ static int collect_crlite_metrics(crlite_metrics_t *metrics)
     if (!crlite_build_cascade(&cascade, metrics))
         return 0;
 
-    for (size_t round = 0; round < BENCH_ROUNDS; round++)
+    for (size_t round = 0; round < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; round++)
     {
         double t0 = now_ms_highres();
         for (size_t i = 0; i < BENCH_SCALE_QUERY_COUNT; i++)
         {
-            uint64_t serial
-                = bench_mix64(((uint64_t)round << 32U) ^ (uint64_t)i)
+            uint64_t serial = bench_mix64(BENCH_REPRO_SEED
+                                  ^ ((uint64_t)round << 32U) ^ (uint64_t)i)
                 % (uint64_t)BENCH_SCALE_TOTAL_CERTS;
             int predicted
                 = crlite_query_upto(&cascade, serial, cascade.level_count);
             if (predicted)
                 revoked_hits++;
         }
-        samples[round] = now_ms_highres() - t0;
+        if (round >= BENCH_WARMUP_ROUNDS)
+            samples[round - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
 
     for (size_t i = 0; i < BENCH_SCALE_QUERY_COUNT; i++)
     {
-        uint64_t serial = bench_mix64(0xabcddcbaULL ^ (uint64_t)i)
+        uint64_t serial
+            = bench_mix64(BENCH_REPRO_SEED ^ 0xabcddcbaULL ^ (uint64_t)i)
             % (uint64_t)BENCH_SCALE_TOTAL_CERTS;
         int predicted
             = crlite_query_upto(&cascade, serial, cascade.level_count);
@@ -1250,7 +1405,15 @@ static int collect_crlite_metrics(crlite_metrics_t *metrics)
             query_error_count++;
     }
     (void)revoked_hits;
-    metrics->lookup_ms = median_ms(samples, BENCH_ROUNDS);
+    if (!timing_stats_from_samples(
+            samples, BENCH_ROUNDS, &metrics->lookup_stats))
+    {
+        crlite_cleanup(&cascade);
+        return 0;
+    }
+    metrics->lookup_ms = metrics->lookup_stats.median_ms;
+    metrics->lookup_per_query_us
+        = (metrics->lookup_ms * 1000.0) / (double)BENCH_SCALE_QUERY_COUNT;
     metrics->query_error_count = query_error_count;
     crlite_cleanup(&cascade);
     return metrics->lookup_ms > 0.0;
@@ -1267,7 +1430,8 @@ static int collect_tinypki_revocation_scale_metrics(
     double prove_samples[BENCH_SCALE_PROVE_ROUNDS];
     double verify_samples[BENCH_ROUNDS];
     size_t proof_len = sizeof(proof_buf);
-    uint64_t good_serial = 900000000ULL;
+    uint64_t good_serial
+        = 900000000ULL + (bench_mix64(BENCH_REPRO_SEED) % 1000000ULL);
     int ok = 0;
 
     if (!metrics)
@@ -1290,7 +1454,7 @@ static int collect_tinypki_revocation_scale_metrics(
         goto cleanup;
     }
 
-    for (size_t i = 0; i < BENCH_SCALE_PROVE_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_SCALE_PROVE_ROUNDS; i++)
     {
         sm2_rev_absence_proof_t local_proof;
         double t0 = now_ms_highres();
@@ -1301,17 +1465,19 @@ static int collect_tinypki_revocation_scale_metrics(
         {
             goto cleanup;
         }
-        prove_samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            prove_samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
 
     if (sm2_rev_tree_prove_absence(tree, good_serial, &proof) != SM2_IC_SUCCESS)
         goto cleanup;
-    for (size_t i = 0; i < BENCH_ROUNDS; i++)
+    for (size_t i = 0; i < BENCH_WARMUP_ROUNDS + BENCH_ROUNDS; i++)
     {
         double t0 = now_ms_highres();
         if (sm2_rev_tree_verify_absence(root_hash, &proof) != SM2_IC_SUCCESS)
             goto cleanup;
-        verify_samples[i] = now_ms_highres() - t0;
+        if (i >= BENCH_WARMUP_ROUNDS)
+            verify_samples[i - BENCH_WARMUP_ROUNDS] = now_ms_highres() - t0;
     }
     if (sm2_rev_absence_proof_encode(&proof, proof_buf, &proof_len)
         != SM2_IC_SUCCESS)
@@ -1321,9 +1487,15 @@ static int collect_tinypki_revocation_scale_metrics(
 
     metrics->revoked_certs = BENCH_SCALE_REVOKED_CERTS;
     metrics->proof_bytes = proof_len;
-    metrics->prove_absence_ms
-        = median_ms(prove_samples, BENCH_SCALE_PROVE_ROUNDS);
-    metrics->verify_absence_ms = median_ms(verify_samples, BENCH_ROUNDS);
+    if (!timing_stats_from_samples(prove_samples, BENCH_SCALE_PROVE_ROUNDS,
+            &metrics->prove_absence_stats)
+        || !timing_stats_from_samples(
+            verify_samples, BENCH_ROUNDS, &metrics->verify_absence_stats))
+    {
+        goto cleanup;
+    }
+    metrics->prove_absence_ms = metrics->prove_absence_stats.median_ms;
+    metrics->verify_absence_ms = metrics->verify_absence_stats.median_ms;
     metrics->verifier_cache_bytes
         = SM2_REV_MERKLE_HASH_LEN + sizeof(uint64_t) + sizeof(uint64_t);
     metrics->edge_tree_storage_estimate_bytes = BENCH_SCALE_REVOKED_CERTS
@@ -1354,6 +1526,42 @@ static double pct_of(size_t part, size_t whole)
     return ((double)part * 100.0) / (double)whole;
 }
 
+static void emit_json_timing_stats(FILE *out, const char *name,
+    const bench_timing_stats_t *stats, int trailing_comma)
+{
+    if (!out || !name || !stats)
+        return;
+    fprintf(out, "      \"%s\": {", name);
+    fprintf(out, "\"samples\": %zu, ", stats->sample_count);
+    fprintf(out, "\"min\": %.6f, ", stats->min_ms);
+    fprintf(out, "\"median\": %.6f, ", stats->median_ms);
+    fprintf(out, "\"p95\": %.6f, ", stats->p95_ms);
+    fprintf(out, "\"max\": %.6f, ", stats->max_ms);
+    fprintf(out, "\"mean\": %.6f, ", stats->mean_ms);
+    fprintf(out, "\"stddev\": %.6f, ", stats->stddev_ms);
+    fprintf(out, "\"relative_stddev\": %.6f, ", stats->rel_stddev);
+    fprintf(out, "\"p95_to_median\": %.6f, ", stats->p95_to_median);
+    fprintf(out, "\"stable\": %s}", bench_bool_json(stats->stable));
+    fprintf(out, "%s\n", trailing_comma ? "," : "");
+}
+
+static void emit_json_compiler(FILE *out)
+{
+    if (!out)
+        return;
+    fprintf(out, "      \"name\": \"%s\"", bench_compiler_name());
+#if defined(__clang__)
+    fprintf(out, ", \"major\": %d, \"minor\": %d, \"patch\": %d",
+        __clang_major__, __clang_minor__, __clang_patchlevel__);
+#elif defined(__GNUC__)
+    fprintf(out, ", \"major\": %d, \"minor\": %d, \"patch\": %d", __GNUC__,
+        __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+#elif defined(_MSC_VER)
+    fprintf(out, ", \"msvc_version\": %d", _MSC_VER);
+#endif
+    fprintf(out, "\n");
+}
+
 static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
     const capability_timing_metrics_t *timings,
     const comparison_metrics_t *comparison)
@@ -1364,8 +1572,24 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
 
     fprintf(out, "{\n");
     fprintf(out, "  \"metadata\": {\n");
+    fprintf(out, "    \"schema_version\": 2,\n");
     fprintf(out, "    \"benchmark\": \"tinypki-capability-suite\",\n");
     fprintf(out, "    \"evidence_model\": \"epoch_bundle\",\n");
+    fprintf(out, "    \"dataset_model\": \"deterministic_serial_sets\",\n");
+    fprintf(out, "    \"crypto_material\": \"generated_per_run\",\n");
+    fprintf(out, "    \"timer\": \"platform_high_resolution_clock\",\n");
+    fprintf(out, "    \"git_commit\": \"%s\",\n", BENCH_GIT_COMMIT);
+    fprintf(out, "    \"git_dirty\": %s,\n", bench_bool_json(BENCH_GIT_DIRTY));
+    fprintf(out, "    \"generated_at_unix\": %llu,\n",
+        (unsigned long long)current_unix_ts());
+    fprintf(out, "    \"os\": \"%s\",\n", bench_os_name());
+    fprintf(out, "    \"build_mode\": \"%s\",\n", bench_build_mode());
+    fprintf(out, "    \"compiler\": {\n");
+    emit_json_compiler(out);
+    fprintf(out, "    },\n");
+    fprintf(out, "    \"deterministic_seed\": %llu,\n",
+        (unsigned long long)BENCH_REPRO_SEED);
+    fprintf(out, "    \"warmup_rounds\": %u,\n", (unsigned)BENCH_WARMUP_ROUNDS);
     fprintf(out, "    \"rounds\": %u,\n", (unsigned)BENCH_ROUNDS);
     fprintf(out, "    \"scale_total_certs\": %u,\n",
         (unsigned)BENCH_SCALE_TOTAL_CERTS);
@@ -1373,8 +1597,14 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
         (unsigned)BENCH_SCALE_REVOKED_CERTS);
     fprintf(out, "    \"scale_query_count\": %u,\n",
         (unsigned)BENCH_SCALE_QUERY_COUNT);
-    fprintf(out, "    \"scale_prove_rounds\": %u\n",
+    fprintf(out, "    \"scale_prove_rounds\": %u,\n",
         (unsigned)BENCH_SCALE_PROVE_ROUNDS);
+    fprintf(out, "    \"stability_thresholds\": {\n");
+    fprintf(out, "      \"max_relative_stddev\": %.2f,\n",
+        BENCH_STABLE_MAX_REL_STDDEV);
+    fprintf(out, "      \"max_p95_to_median\": %.2f\n",
+        BENCH_STABLE_MAX_P95_TO_MEDIAN);
+    fprintf(out, "    }\n");
     fprintf(out, "  },\n");
     fprintf(out, "  \"sizes\": {\n");
     fprintf(out, "    \"cert_bytes\": %zu,\n", sizes->cert_bytes);
@@ -1404,10 +1634,32 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
         comparison->tinypki_revocation.verify_absence_ms);
     fprintf(out, "    \"crlite_cascade_lookup_median\": %.3f,\n",
         comparison->crlite.lookup_ms);
+    fprintf(out, "    \"crlite_cascade_lookup_per_query_us\": %.6f,\n",
+        comparison->crlite.lookup_per_query_us);
     fprintf(out, "    \"crl_verify_lookup_median\": %.3f,\n",
         comparison->openssl.crl_verify_lookup_ms);
     fprintf(out, "    \"ocsp_verify_median\": %.3f\n",
         comparison->openssl.ocsp_verify_ms);
+    fprintf(out, "  },\n");
+    fprintf(out, "  \"timing_stats_ms\": {\n");
+    emit_json_timing_stats(
+        out, "export_epoch_evidence", &timings->export_epoch_evidence_stats, 1);
+    emit_json_timing_stats(
+        out, "witness_sign", &timings->witness_sign_stats, 1);
+    emit_json_timing_stats(
+        out, "verify_epoch_bundle", &timings->verify_epoch_bundle_stats, 1);
+    emit_json_timing_stats(out, "tinypki_sparse_prove_absence",
+        &comparison->tinypki_revocation.prove_absence_stats, 1);
+    emit_json_timing_stats(out, "tinypki_sparse_verify_absence",
+        &comparison->tinypki_revocation.verify_absence_stats, 1);
+    emit_json_timing_stats(out, "crlite_cascade_lookup_batch",
+        &comparison->crlite.lookup_stats, 1);
+    emit_json_timing_stats(out, "crl_verify_lookup",
+        &comparison->openssl.crl_verify_lookup_stats, 1);
+    emit_json_timing_stats(out, "crl_scale_verify_lookup",
+        &comparison->openssl.scale_crl_verify_lookup_stats, 1);
+    emit_json_timing_stats(
+        out, "ocsp_verify", &comparison->openssl.ocsp_verify_stats, 0);
     fprintf(out, "  },\n");
     fprintf(out, "  \"comparison\": {\n");
     fprintf(out, "    \"certificate_bytes\": {\n");
@@ -1426,6 +1678,8 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
         comparison->crlite.filter_bytes);
     fprintf(out, "      \"crl_verifier_list\": %zu,\n",
         comparison->openssl.crl_der_bytes);
+    fprintf(out, "      \"crl_scale_verifier_list\": %zu,\n",
+        comparison->openssl.scale_crl_der_bytes);
     fprintf(out, "      \"ocsp_verifier_persistent\": %u\n", 0U);
     fprintf(out, "    },\n");
     fprintf(out, "    \"transmission_bytes\": {\n");
@@ -1443,8 +1697,12 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
     fprintf(out, "      \"crlite_per_auth_revocation_bytes\": %u,\n", 0U);
     fprintf(out, "      \"ocsp_request_response\": %zu,\n",
         comparison->openssl.ocsp_wire_bytes);
-    fprintf(out, "      \"crl_download\": %zu\n",
+    fprintf(out, "      \"crl_download\": %zu,\n",
         comparison->openssl.crl_der_bytes);
+    fprintf(out, "      \"crl_scale_download\": %zu,\n",
+        comparison->openssl.scale_crl_der_bytes);
+    fprintf(out, "      \"crl_delta_background_estimate\": %zu\n",
+        comparison->openssl.crl_delta_bytes);
     fprintf(out, "    },\n");
     fprintf(out, "    \"query_time_ms\": {\n");
     fprintf(out, "      \"tinypki_sparse_absence_verify\": %.3f,\n",
@@ -1453,11 +1711,68 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
         comparison->tinypki_revocation.prove_absence_ms);
     fprintf(out, "      \"crlite_cascade_bloom_lookup\": %.3f,\n",
         comparison->crlite.lookup_ms);
+    fprintf(out, "      \"crlite_cascade_bloom_lookup_per_query_us\": %.6f,\n",
+        comparison->crlite.lookup_per_query_us);
     fprintf(out, "      \"crl_verify_lookup\": %.3f,\n",
         comparison->openssl.crl_verify_lookup_ms);
+    fprintf(out, "      \"crl_scale_verify_lookup\": %.3f,\n",
+        comparison->openssl.scale_crl_verify_lookup_ms);
     fprintf(out, "      \"ocsp_verify\": %.3f\n",
         comparison->openssl.ocsp_verify_ms);
     fprintf(out, "    },\n");
+    fprintf(out, "    \"scheme_comparison\": [\n");
+    fprintf(out,
+        "      {\"scheme\":\"TinyPKI\",\"certificate_bytes\":%zu,"
+        "\"verifier_storage_bytes\":%zu,\"edge_or_server_storage_bytes\":%zu,"
+        "\"foreground_bytes\":%zu,\"scale_foreground_bytes\":%zu,"
+        "\"full_update_bytes\":%zu,\"delta_update_bytes\":%zu,"
+        "\"scale_state_or_proof_bytes\":%zu,\"query_verify_ms\":%.6f,"
+        "\"false_positive_repairs\":%u,\"online_required\":false},\n",
+        sizes->cert_bytes, comparison->tinypki_revocation.verifier_cache_bytes,
+        comparison->tinypki_revocation.edge_tree_storage_estimate_bytes,
+        sizes->authentication_bundle_bytes, tinypki_scale_auth_bytes,
+        sizes->epoch_root_bytes, sizes->epoch_root_bytes,
+        comparison->tinypki_revocation.proof_bytes,
+        comparison->tinypki_revocation.verify_absence_ms, 0U);
+    fprintf(out,
+        "      {\"scheme\":\"OCSP\",\"certificate_bytes\":%zu,"
+        "\"verifier_storage_bytes\":%u,\"edge_or_server_storage_bytes\":%u,"
+        "\"foreground_bytes\":%zu,\"scale_foreground_bytes\":%zu,"
+        "\"full_update_bytes\":%u,\"delta_update_bytes\":%u,"
+        "\"scale_state_or_proof_bytes\":%zu,\"query_verify_ms\":%.6f,"
+        "\"false_positive_repairs\":%u,\"online_required\":true},\n",
+        comparison->openssl.x509_cert_bytes, 0U, 0U,
+        comparison->openssl.ocsp_wire_bytes,
+        comparison->openssl.ocsp_wire_bytes, 0U, 0U,
+        comparison->openssl.ocsp_wire_bytes, comparison->openssl.ocsp_verify_ms,
+        0U);
+    fprintf(out,
+        "      {\"scheme\":\"CRL\",\"certificate_bytes\":%zu,"
+        "\"verifier_storage_bytes\":%zu,\"edge_or_server_storage_bytes\":%u,"
+        "\"foreground_bytes\":%zu,\"scale_foreground_bytes\":%zu,"
+        "\"full_update_bytes\":%zu,\"delta_update_bytes\":%zu,"
+        "\"scale_state_or_proof_bytes\":%zu,\"query_verify_ms\":%.6f,"
+        "\"false_positive_repairs\":%u,\"online_required\":false},\n",
+        comparison->openssl.x509_cert_bytes, comparison->openssl.crl_der_bytes,
+        0U, comparison->openssl.crl_der_bytes,
+        comparison->openssl.scale_crl_der_bytes,
+        comparison->openssl.scale_crl_der_bytes,
+        comparison->openssl.crl_delta_bytes,
+        comparison->openssl.scale_crl_der_bytes,
+        comparison->openssl.scale_crl_verify_lookup_ms, 0U);
+    fprintf(out,
+        "      {\"scheme\":\"CRLite\",\"certificate_bytes\":%zu,"
+        "\"verifier_storage_bytes\":%zu,\"edge_or_server_storage_bytes\":%u,"
+        "\"foreground_bytes\":%u,\"scale_foreground_bytes\":%u,"
+        "\"full_update_bytes\":%zu,\"delta_update_bytes\":%zu,"
+        "\"scale_state_or_proof_bytes\":%zu,\"query_verify_ms\":%.6f,"
+        "\"false_positive_repairs\":%zu,\"online_required\":false}\n",
+        comparison->openssl.x509_cert_bytes, comparison->crlite.filter_bytes,
+        0U, 0U, 0U, comparison->crlite.filter_bytes,
+        comparison->crlite.delta_bytes, comparison->crlite.filter_bytes,
+        comparison->crlite.lookup_per_query_us / 1000.0,
+        comparison->crlite.repaired_false_positive_count);
+    fprintf(out, "    ],\n");
     fprintf(out, "    \"crlite_scale\": {\n");
     fprintf(
         out, "      \"total_certs\": %zu,\n", comparison->crlite.total_certs);
@@ -1483,36 +1798,7 @@ static void emit_json(FILE *out, const capability_size_metrics_t *sizes,
         comparison->tinypki_revocation.verifier_cache_bytes);
     fprintf(out, "      \"edge_sparse_tree_storage_estimate_bytes\": %zu\n",
         comparison->tinypki_revocation.edge_tree_storage_estimate_bytes);
-    fprintf(out, "    },\n");
-    fprintf(out, "    \"tinypki_advantages_over_crlite\": [\n");
-    fprintf(out,
-        "      \"Verifier keeps only an epoch checkpoint instead of the "
-        "whole revocation filter set.\",\n");
-    fprintf(out,
-        "      \"Revocation result is an exact signed sparse-Merkle proof, "
-        "not a probabilistic filter decision.\",\n");
-    fprintf(out,
-        "      \"The same epoch evidence also binds issuance transparency "
-        "and witness threshold signatures.\",\n");
-    fprintf(out,
-        "      \"Path-compressed sparse-proof verification only hashes real "
-        "branch points and is faster than the CRLite lookup in this "
-        "benchmark.\",\n");
-    fprintf(out,
-        "      \"ECQV certificates reduce the base certificate payload "
-        "before revocation evidence is considered.\"\n");
-    fprintf(out, "    ],\n");
-    fprintf(out, "    \"crlite_advantages_over_tinypki\": [\n");
-    fprintf(out,
-        "      \"After filters are cached, revocation lookup adds zero "
-        "per-authentication bytes.\",\n");
-    fprintf(out,
-        "      \"CRLite avoids edge-side Merkle proof construction on the "
-        "foreground path.\",\n");
-    fprintf(out,
-        "      \"After filters are distributed, CRLite lookup cost is "
-        "independent of carried proof depth.\"\n");
-    fprintf(out, "    ]\n");
+    fprintf(out, "    }\n");
     fprintf(out, "  }\n");
     fprintf(out, "}\n");
 }
@@ -1537,6 +1823,16 @@ static void build_markdown_report_path(
     buf[base_len + 3U] = '\0';
 }
 
+static void emit_markdown_timing_stats_row(FILE *out, const char *scheme,
+    const char *operation, const bench_timing_stats_t *stats)
+{
+    if (!out || !scheme || !operation || !stats)
+        return;
+    fprintf(out, "| %s | %s | %.6f | %.6f | %.6f | %.2f | %s |\n", scheme,
+        operation, stats->median_ms, stats->p95_ms, stats->mean_ms,
+        stats->rel_stddev, stats->stable ? "yes" : "no");
+}
+
 static void emit_markdown_report(FILE *out,
     const capability_size_metrics_t *sizes,
     const capability_timing_metrics_t *timings,
@@ -1550,142 +1846,130 @@ static void emit_markdown_report(FILE *out,
         - sizes->revocation_proof_bytes
         + comparison->tinypki_revocation.proof_bytes;
 
-    fprintf(out, "# TinyPKI Capability Comparison Report\n\n");
+    fprintf(out, "# Capability Comparison Report\n\n");
     fprintf(out,
-        "Generated by `sm2_bench_capability_suite`. CRL/OCSP measurements use "
-        "local OpenSSL objects; CRLite is a local cascading Bloom-filter "
-        "simulation at the configured scale.\n\n");
+        "Generated by `sm2_bench_capability_suite`. Every table keeps the "
+        "same scheme order: TinyPKI, OCSP, CRL, and CRLite. CRL now has both "
+        "the baseline %u-entry measurement and the scale %u-entry "
+        "measurement.\n\n",
+        (unsigned)BENCH_BASELINE_CRL_ENTRIES,
+        (unsigned)BENCH_SCALE_REVOKED_CERTS);
 
-    fprintf(out, "## Summary\n\n");
+    fprintf(out, "## Test Conditions\n\n");
     fprintf(out, "| Metric | Value |\n");
     fprintf(out, "| --- | ---: |\n");
-    fprintf(out, "| ECQV cert bytes | %zu |\n", sizes->cert_bytes);
-    fprintf(out, "| X.509 cert bytes | %zu |\n",
-        comparison->openssl.x509_cert_bytes);
-    fprintf(out, "| ECQV / X.509 | %.2f%% |\n",
-        pct_of(sizes->cert_bytes, comparison->openssl.x509_cert_bytes));
-    fprintf(out, "| TinyPKI auth bundle bytes | %zu |\n",
-        sizes->authentication_bundle_bytes);
-    fprintf(out, "| TinyPKI scale auth bundle estimate | %zu |\n",
-        tinypki_scale_auth_bytes);
-    fprintf(out, "| TinyPKI evidence bundle bytes | %zu |\n",
-        sizes->evidence_bundle_bytes);
-    fprintf(out, "| TinyPKI scale absence proof bytes | %zu |\n",
-        comparison->tinypki_revocation.proof_bytes);
-    fprintf(out, "| CRLite cascade filter bytes | %zu |\n",
-        comparison->crlite.filter_bytes);
-    fprintf(out, "| CRLite delta estimate bytes | %zu |\n",
-        comparison->crlite.delta_bytes);
-    fprintf(out, "| OCSP request+response bytes | %zu |\n",
-        comparison->openssl.ocsp_wire_bytes);
-    fprintf(
-        out, "| CRL DER bytes | %zu |\n\n", comparison->openssl.crl_der_bytes);
+    fprintf(out, "| Total certificates in scale run | %u |\n",
+        (unsigned)BENCH_SCALE_TOTAL_CERTS);
+    fprintf(out, "| Revoked certificates in scale run | %u |\n",
+        (unsigned)BENCH_SCALE_REVOKED_CERTS);
+    fprintf(out, "| Query samples per round | %u |\n",
+        (unsigned)BENCH_SCALE_QUERY_COUNT);
+    fprintf(out, "| Deterministic dataset seed | %llu |\n",
+        (unsigned long long)BENCH_REPRO_SEED);
+    fprintf(out, "| Warmup rounds | %u |\n", (unsigned)BENCH_WARMUP_ROUNDS);
+    fprintf(out, "| Measured timing rounds | %u |\n", (unsigned)BENCH_ROUNDS);
+    fprintf(out, "| Git commit | `%s` |\n", BENCH_GIT_COMMIT);
+    fprintf(out, "| Git dirty | %s |\n", BENCH_GIT_DIRTY ? "yes" : "no");
+    fprintf(out, "| OS | %s |\n", bench_os_name());
+    fprintf(out, "| Compiler | %s |\n", bench_compiler_name());
+    fprintf(out, "| Build mode | %s |\n\n", bench_build_mode());
 
-    fprintf(out, "## Local Storage\n\n");
-    fprintf(out, "| Scheme | Verifier-side storage | Edge/server storage |\n");
-    fprintf(out, "| --- | ---: | ---: |\n");
-    fprintf(out, "| TinyPKI | %zu | %zu |\n",
-        comparison->tinypki_revocation.verifier_cache_bytes,
-        comparison->tinypki_revocation.edge_tree_storage_estimate_bytes);
-    fprintf(out, "| CRLite | %zu | 0 |\n", comparison->crlite.filter_bytes);
-    fprintf(out, "| OCSP | 0 | 0 |\n");
-    fprintf(out, "| CRL | %zu | 0 |\n\n", comparison->openssl.crl_der_bytes);
-
-    fprintf(out, "## Query Time\n\n");
-    fprintf(out, "| Scheme | Median time |\n");
-    fprintf(out, "| --- | ---: |\n");
-    fprintf(out, "| TinyPKI sparse absence proof verify | %.3f ms |\n",
-        comparison->tinypki_revocation.verify_absence_ms);
-    fprintf(out, "| TinyPKI sparse absence proof build | %.3f ms |\n",
-        comparison->tinypki_revocation.prove_absence_ms);
-    fprintf(out, "| TinyPKI full epoch bundle verify | %.3f ms |\n",
-        timings->verify_epoch_bundle_ms);
-    fprintf(out, "| CRLite cascade Bloom lookup | %.3f ms |\n",
-        comparison->crlite.lookup_ms);
-    fprintf(out, "| OCSP response verify | %.3f ms |\n",
-        comparison->openssl.ocsp_verify_ms);
-    fprintf(out, "| CRL verify+lookup | %.3f ms |\n\n",
-        comparison->openssl.crl_verify_lookup_ms);
-
-    fprintf(out, "## Transmission Cost\n\n");
-    fprintf(out, "| Scheme | Per-auth foreground bytes | Background bytes |\n");
-    fprintf(out, "| --- | ---: | ---: |\n");
-    fprintf(out, "| TinyPKI current flow | %zu | %zu |\n",
-        sizes->authentication_bundle_bytes, sizes->epoch_root_bytes);
-    fprintf(out, "| TinyPKI scale proof estimate | %zu | %zu |\n",
-        tinypki_scale_auth_bytes, sizes->epoch_root_bytes);
-    fprintf(out, "| CRLite | 0 | %zu |\n", comparison->crlite.filter_bytes);
-    fprintf(out, "| CRLite delta estimate | 0 | %zu |\n",
-        comparison->crlite.delta_bytes);
-    fprintf(out, "| OCSP | %zu | 0 |\n", comparison->openssl.ocsp_wire_bytes);
-    fprintf(out, "| CRL | 0 | %zu |\n\n", comparison->openssl.crl_der_bytes);
-
-    fprintf(out, "## CRLite Scale Simulation\n\n");
-    fprintf(out, "| Metric | Value |\n");
-    fprintf(out, "| --- | ---: |\n");
-    fprintf(out, "| Total certs | %zu |\n", comparison->crlite.total_certs);
-    fprintf(out, "| Revoked certs | %zu |\n", comparison->crlite.revoked_certs);
-    fprintf(out, "| Query count per round | %zu |\n",
-        comparison->crlite.query_count);
-    fprintf(out, "| Cascade levels | %zu |\n", comparison->crlite.level_count);
-    fprintf(out, "| Repaired false positives | %zu |\n",
-        comparison->crlite.repaired_false_positive_count);
-    fprintf(out, "| Sample query errors | %zu |\n\n",
-        comparison->crlite.query_error_count);
-
-    fprintf(out, "## What TinyPKI Gains Over CRLite\n\n");
+    fprintf(out, "## Cross-scheme Matrix\n\n");
     fprintf(out,
-        "- The verifier storage stays near an epoch checkpoint (%zu B here), "
-        "while CRLite stores the cascade filters (%zu B here).\n",
-        comparison->tinypki_revocation.verifier_cache_bytes,
-        comparison->crlite.filter_bytes);
+        "| Scheme | Cert bytes | Verifier storage | Edge/server state | "
+        "Foreground bytes | Scale foreground bytes | Full update bytes | "
+        "Delta update bytes | Query/verify median | Scale object | Repairs | "
+        "Online required |\n");
     fprintf(out,
-        "- The revocation result is an exact sparse-Merkle proof bound to a "
-        "CA-signed epoch, not a probabilistic filter decision.\n");
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+        "---: | ---: | --- |\n");
     fprintf(out,
-        "- Path-compressed proof verification hashes only real branch points; "
-        "in this run TinyPKI verifies in %.3f ms versus CRLite lookup at "
-        "%.3f ms.\n",
+        "| TinyPKI | %zu | %zu | %zu | %zu | %zu | %zu | %zu | %.3f ms | "
+        "%zu | 0 | no |\n",
+        sizes->cert_bytes, comparison->tinypki_revocation.verifier_cache_bytes,
+        comparison->tinypki_revocation.edge_tree_storage_estimate_bytes,
+        sizes->authentication_bundle_bytes, tinypki_scale_auth_bytes,
+        sizes->epoch_root_bytes, sizes->epoch_root_bytes,
         comparison->tinypki_revocation.verify_absence_ms,
-        comparison->crlite.lookup_ms);
+        comparison->tinypki_revocation.proof_bytes);
     fprintf(out,
-        "- The same evidence path also verifies issuance transparency and "
-        "witness threshold signatures; CRLite only addresses revocation.\n");
+        "| OCSP | %zu | 0 | 0 | %zu | %zu | 0 | 0 | %.3f ms | %zu | "
+        "0 | yes |\n",
+        comparison->openssl.x509_cert_bytes,
+        comparison->openssl.ocsp_wire_bytes,
+        comparison->openssl.ocsp_wire_bytes, comparison->openssl.ocsp_verify_ms,
+        comparison->openssl.ocsp_wire_bytes);
     fprintf(out,
-        "- ECQV reduces the base certificate from %zu B to %zu B before any "
-        "revocation mechanism is counted.\n\n",
-        comparison->openssl.x509_cert_bytes, sizes->cert_bytes);
+        "| CRL | %zu | %zu | 0 | %zu | %zu | %zu | %zu | %.3f ms | %zu | "
+        "0 | no |\n",
+        comparison->openssl.x509_cert_bytes, comparison->openssl.crl_der_bytes,
+        comparison->openssl.crl_der_bytes,
+        comparison->openssl.scale_crl_der_bytes,
+        comparison->openssl.scale_crl_der_bytes,
+        comparison->openssl.crl_delta_bytes,
+        comparison->openssl.scale_crl_verify_lookup_ms,
+        comparison->openssl.scale_crl_der_bytes);
     fprintf(out,
-        "The tradeoff is visible in the scale estimate: proof-carrying "
-        "authentication grows to %zu B here, while CRLite moves that cost into "
-        "a %zu B cached filter set.\n\n",
-        tinypki_scale_auth_bytes, comparison->crlite.filter_bytes);
+        "| CRLite | %zu | %zu | 0 | 0 | 0 | %zu | %zu | %.6f ms | %zu | "
+        "%zu | no |\n\n",
+        comparison->openssl.x509_cert_bytes, comparison->crlite.filter_bytes,
+        comparison->crlite.filter_bytes, comparison->crlite.delta_bytes,
+        comparison->crlite.lookup_per_query_us / 1000.0,
+        comparison->crlite.filter_bytes,
+        comparison->crlite.repaired_false_positive_count);
 
-    fprintf(out, "## What CRLite Still Does Better\n\n");
+    fprintf(out, "## Timing Details\n\n");
     fprintf(out,
-        "- Once filters are cached, CRLite adds zero foreground revocation "
-        "bytes per authentication.\n");
+        "| Scheme | Operation measured | Median ms | P95 ms | Mean ms | "
+        "Rel stddev | Stable |\n");
+    fprintf(out, "| --- | --- | ---: | ---: | ---: | ---: | --- |\n");
+    emit_markdown_timing_stats_row(out, "TinyPKI", "export epoch evidence",
+        &timings->export_epoch_evidence_stats);
+    emit_markdown_timing_stats_row(
+        out, "TinyPKI", "witness sign", &timings->witness_sign_stats);
+    emit_markdown_timing_stats_row(out, "TinyPKI", "full evidence verification",
+        &timings->verify_epoch_bundle_stats);
+    emit_markdown_timing_stats_row(out, "TinyPKI", "sparse proof construction",
+        &comparison->tinypki_revocation.prove_absence_stats);
+    emit_markdown_timing_stats_row(out, "TinyPKI", "sparse proof verification",
+        &comparison->tinypki_revocation.verify_absence_stats);
+    emit_markdown_timing_stats_row(out, "OCSP", "response verification",
+        &comparison->openssl.ocsp_verify_stats);
+    emit_markdown_timing_stats_row(out, "CRL", "baseline verify+lookup",
+        &comparison->openssl.crl_verify_lookup_stats);
+    emit_markdown_timing_stats_row(out, "CRL", "scale verify+lookup",
+        &comparison->openssl.scale_crl_verify_lookup_stats);
+    emit_markdown_timing_stats_row(out, "CRLite", "cascade lookup batch",
+        &comparison->crlite.lookup_stats);
     fprintf(out,
-        "- CRLite avoids foreground Merkle proof construction; in this run, "
-        "TinyPKI proof construction is %.3f ms at the configured scale.\n",
-        comparison->tinypki_revocation.prove_absence_ms);
-    if (comparison->tinypki_revocation.verify_absence_ms
-        <= comparison->crlite.lookup_ms)
-    {
-        fprintf(out,
-            "- CRLite does not win query speed in this run; its lookup is "
-            "%.3f ms versus TinyPKI exact proof verification at %.3f ms.\n",
-            comparison->crlite.lookup_ms,
-            comparison->tinypki_revocation.verify_absence_ms);
-    }
-    else
-    {
-        fprintf(out,
-            "- CRLite Bloom lookup remains faster than exact proof "
-            "verification in this run (%.3f ms vs %.3f ms).\n",
-            comparison->crlite.lookup_ms,
-            comparison->tinypki_revocation.verify_absence_ms);
-    }
+        "\nCRLite per-query median is %.6f us, computed from the %u-query "
+        "batch median. The batch row is retained because one timed round "
+        "performs many filter queries to avoid timer noise.\n\n",
+        comparison->crlite.lookup_per_query_us,
+        (unsigned)BENCH_SCALE_QUERY_COUNT);
+
+    fprintf(out, "## Interpretation\n\n");
+    fprintf(out,
+        "- TinyPKI spends foreground bytes on a carried exact proof, but keeps "
+        "verifier storage at %zu B and does not require an online check.\n",
+        comparison->tinypki_revocation.verifier_cache_bytes);
+    fprintf(out,
+        "- OCSP keeps verifier storage at 0 B, but each decision depends on an "
+        "online response path and therefore exposes query timing and target "
+        "certificate information to the status service.\n");
+    fprintf(out,
+        "- CRL is simple and offline after download, but the measured scale "
+        "CRL "
+        "is %zu B and the scale verify+lookup time is %.3f ms.\n",
+        comparison->openssl.scale_crl_der_bytes,
+        comparison->openssl.scale_crl_verify_lookup_ms);
+    fprintf(out,
+        "- CRLite has 0 foreground revocation bytes after filters are cached, "
+        "but the verifier keeps %zu B of filters and the scale simulation "
+        "has %zu repaired false positives. Its timing row is a batch lookup; "
+        "the cross-scheme matrix uses the derived per-query median.\n",
+        comparison->crlite.filter_bytes,
+        comparison->crlite.repaired_false_positive_count);
 }
 
 int main(int argc, char **argv)

@@ -141,6 +141,7 @@ cmake --build build --target sm2_bench_capability_suite -j 4
 > `bench_capability_suite` 目前同时输出三类结果：
 > TinyPKI 主链路实测、基于 OpenSSL 本地生成并校验的 `CRL/OCSP` 对照基线、以及本地级联 Bloom filter 的 CRLite 风格建模对比。
 > 当指定 JSON 输出路径时，还会自动生成同名 `.md` 表格报告，便于直接查看和写材料。
+> 输出中包含固定数据集 seed、git commit、编译器、系统、预热轮数、正式测量轮数，以及每个计时项的 median、p95、均值、标准差和稳定性标记；后续论文或文档引用数据时应优先使用稳定性标记为 `true` 的结果。
 
 > 为方便审计与排查，完整测试已按领域拆分。当前可单独执行：
 > `suite_ecqv`（隐式证书构造与验证）、
