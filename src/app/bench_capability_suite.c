@@ -43,6 +43,25 @@
 #define BENCH_CRLITE_FP_RATE 0.01
 #define BENCH_CRLITE_DELTA_FRACTION 0.05
 
+static int bench_output_path_is_safe(const char *path)
+{
+    if (!path || path[0] == '\0')
+        return 0;
+    if (path[0] == '/' || path[0] == '\\')
+        return 0;
+    if (((path[0] >= 'A' && path[0] <= 'Z')
+            || (path[0] >= 'a' && path[0] <= 'z'))
+        && path[1] == ':' && (path[2] == '/' || path[2] == '\\'))
+    {
+        return 0;
+    }
+    if (strstr(path, "..") != NULL)
+        return 0;
+
+    if (path[0] == '.' && (path[1] == '/' || path[1] == '\\'))
+        path += 2;
+    return strncmp(path, "tmp/", 4) == 0 || strncmp(path, "tmp\\", 4) == 0;
+}
 typedef struct
 {
     size_t cert_bytes;
@@ -1697,6 +1716,13 @@ int main(int argc, char **argv)
 
     if (argc > 1)
     {
+        if (!bench_output_path_is_safe(argv[1]))
+        {
+            fprintf(stderr,
+                "Refusing benchmark output path outside ./tmp/: %s\n", argv[1]);
+            cleanup_flow(&ctx);
+            return 1;
+        }
         out = fopen(argv[1], "wb");
         if (!out)
         {
