@@ -26,6 +26,10 @@ internal_doc/
 /--json
 /--json.md
 
+# Local git inspection captures
+/files_changed.txt
+/git_changes.txt
+
 # OS / debug artifacts
 *.dSYM/
 *.pdb

@@ -86,7 +86,7 @@ cmake --build build --target sm2_test_merkle_flow -j 4
 
 ## 🧪 测试验证 (Testing)
 
-当前仓库测试主链路由 `ctest` 与 `test_all` 两个入口组成。按当前基线，`ctest` 拆分为 6 个 suite，`test_all` 聚合执行 95 个用例。
+当前仓库测试主链路由 `ctest` 与 `test_all` 两个入口组成。按当前基线，`ctest` 拆分为 6 个 suite，`test_all` 聚合执行 108 个用例。
 
 **运行与 CI 相同的格式检查（固定 clang-format 18）：**
 ```bash
@@ -160,6 +160,13 @@ cmake --build build --target sm2_bench_capability_suite -j 4
 
 ## 📖 文档与接口 (Documentation & API)
 
+项目文档保持为标准开源项目结构：
+
+* [docs/install.md](docs/install.md): 构建、测试和demo运行说明
+* [SECURITY.md](SECURITY.md): 安全策略、漏洞报告方式和release安全检查
+* [docs/security/threat_model.md](docs/security/threat_model.md): TinyPKI威胁模型
+* [docs/security/security_audit_v0.1.0.md](docs/security/security_audit_v0.1.0.md): v0.1.0安全审计记录
+
 公开安全接口采用清晰一致的命名空间。接入时，可按能力维度包含对应头文件：
 
 * `include/sm2_implicit_cert.h`: ECQV 请求生成、CA 签发、证书验证与终端侧密钥重构
@@ -186,7 +193,7 @@ cmake --build build --target sm2_bench_capability_suite -j 4
   checkpoints, redirect hints, quorum/BFT helpers, multiproof compression, and
   epoch/cached proof support.
 - **Mutual Authentication and Secure Sessions** spanning static or ephemeral key agreement, canonical handshake binding, key-usage enforcement, and SM4-GCM/CCM AEAD protection.
-- **Misuse-Resistant High-Level APIs** built around opaque handles, secure defaults, unified error mapping, and a current automated test baseline of 95 cases across `ctest` and `test_all`.
+- **Misuse-Resistant High-Level APIs** built around opaque handles, secure defaults, unified error mapping, and a current automated test baseline of 108 cases across `ctest` and `test_all`.
 
 ## 📄 开源许可证 (License)
 
