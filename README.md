@@ -1,96 +1,105 @@
-﻿# TinyPKI: Lightweight & Resilient PKI for Constrained Environments
+﻿# TinyPKI
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C11-orange.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]()
 [![Build](https://img.shields.io/badge/Build-CMake-brightgreen.svg)]()
 
-[**English Summary**](#english-summary) | [**快速开始**](#快速开始-getting-started) | [**演示与测试**](#场景演示-demos) | [**项目文档**](#文档与接口-documentation--api)
+TinyPKI 是一个面向资源受限设备、弱连接网络和边缘节点的轻量级 PKI 核心库。它使用 C11 和 OpenSSL 3.x EVP 接口实现，围绕 SM2/SM3/SM4、ECQV 隐式证书、Merkle 证明和边缘见证机制，提供从证书签发、撤销校验到认证会话保护的完整主链路。
 
-TinyPKI 是一个面向 IoT 资源受限、弱网与边缘节点场景的轻量 PKI C11 核心库，覆盖证书签发、吊销证明、认证与会话保护等主链路能力。
+项目目标不是替代 TLS、HSM 或完整 WebPKI 生态，而是在 IoT 和边缘计算场景中提供更小的证书载荷、更少的在线依赖、可离线验证的撤销状态，以及可约束 CA 行为的发证透明能力。
 
-本项目基于 OpenSSL EVP 架构与国密算法族（SM2/SM3/SM4）实现，围绕 ECQV 隐式证书构建，并原生提供 CA 签名的统一 epoch 证据包、基于路径压缩 sparse Merkle 的携带式非吊销证明、基于 MMR 的强制发证透明与边缘 witness 门限、撤销状态同步以及面向 service/client 的高层 PKI API。
+## 设计重点
 
-无论是微控制器、智能网关，还是需要本地化吊销校验与安全会话建立的边缘服务组件，TinyPKI 都能提供较低集成成本且接口清晰的实现基础。
+- **ECQV 隐式证书**：设备证书只携带必要恢复信息，验证端根据 CA 公钥重构设备公钥，降低证书编码和传输开销。
+- **路径压缩 sparse Merkle 撤销树**：CA 用撤销根承诺当前撤销状态，设备携带 member 或 absence proof，对端可离线验证证书是否被撤销。
+- **追加式发证记录树**：CA 按签发顺序写入证书承诺，使用 MMR（追加式 Merkle Mountain Range）维护发证记录，避免普通 Merkle 树在持续追加场景中的重复重构。
+- **统一证据包**：一次认证携带证书、撤销证明、发证证明、CA 签名根记录和边缘 witness 签名，验证端用同一个检查点完成联合验证。
+- **边缘 witness 门限**：验证端强制检查 `t-of-n` witness policy，只有足够多边缘节点签过同一个 CA 发布根时，证据包才被接受。
+- **撤销广播与同步**：支持 `nextUpdate`、delta 更新、heartbeat 续期、full checkpoint、重定向候选和 quorum 检查，用于弱网和边缘分区场景。
+- **认证即加密**：身份验证、用途检查、撤销检查和握手绑定通过后，可派生会话密钥并使用 SM4-GCM/CCM 进行 AEAD 保护。
 
----
+## 系统角色
 
-## 核心特性 (Key Features)
+TinyPKI 默认围绕三类角色设计：
 
-本项目具备以下几类核心能力：
+- **轻量化设备**：保存自身证书、私钥、可信 CA 信息、最近验证过的 CA 发布根和必要的本地持久状态。
+- **边缘节点**：缓存撤销状态和发证状态，生成证据包，可作为 witness 对 CA 发布根签名。
+- **CA**：签发 ECQV 证书，维护撤销树和发证记录树，定期发布带签名的根记录。
 
-* **“轻量级”证书，专为弱网与物联网设计**
-  
-  传统数字证书动辄上千字节，在 NB-IoT、LoRa 等窄带网络中传输成本很高。本项目采用基于国密算法的隐式证书（ECQV）技术，提供请求生成、CA 签发、终端侧公私钥重构与证书一致性验证的完整链路，显著降低证书载荷与设备侧处理负担。当前仓库内 benchmark 快照下，ECQV 隐式证书编码为 `89 bytes`，对照本机生成的 X.509 DER 基线 `759 bytes`，约为其 `11.73%`。
-* **极速且保护隐私的证书吊销校验**
+验证时，轻量化设备不需要在线查询 CA。它只需要使用本地可信 CA 根记录，验证对方携带的证据包是否能重新计算到同一个 CA 签名根。
 
-  传统的 OCSP 或 CRL 往往带来额外在线查询和隐私暴露。本项目采用路径压缩 sparse Merkle revocation accumulator，由 CA 签名的 epoch root 承诺当前撤销状态；证书持有方在认证时携带精确 absence proof，对端结合同一个 epoch checkpoint 即可离线确认“未被撤销”。已撤销条目使用 member proof，过期撤销条目可从 sparse tree 中移除，不会挤动其他叶子；验证端只按真实分叉点计算 hash，避免固定展开 256 层空路径。
-* **强制发证透明与边缘见证门限**
+## 仓库结构
 
-  高层 `sm2_pki_verify()` 要求每个对端携带统一 epoch evidence bundle。CA 侧维护按签发顺序追加的 32-byte 证书承诺 MMR log，验证端检查 issuance member proof、CA 签名 epoch root，并必须使用客户端级 `t-of-n` witness policy 验证多个边缘节点对 epoch root 的见证签名。
-* **统一 PKI epoch 证据包**
-
-  CA 签名的 `epoch root` 将当前 revocation sparse root 与 issuance MMR root 绑定成一个检查点；验证端使用 `sm2_pki_evidence_bundle_t` 一次性验证非吊销证明、发证成员证明和 `t-of-n` witness 签名。witness 签名前会检查 issuance log 的 append-only 演进，边缘节点之间也可对 epoch root 投票以发现 CA 分叉。
-* **面向断网与多节点同步的撤销状态维护**
-
-  在边缘与弱连接场景中，撤销状态往往需要跨节点同步而不是依赖单点在线查询。本项目提供 CRL 风格的 `nextUpdate` 发布计划、短周期 delta、heartbeat 续期、低频 full checkpoint、重定向候选、quorum/BFT 检查以及 epoch/cached proof 相关能力，用于在断网、时钟漂移和部分节点异常时维持撤销状态的一致性与可用性。
-* **开箱即用的“认证即加密”全链路保护**
-  
-  项目同时提供静态与临时密钥握手路径。设备可以在双向身份核验、吊销证据校验和用途检查通过后，基于 canonical handshake binding 协商会话密钥，并直接接入 SM4-GCM/CCM 的 AEAD 会话保护。
-* **默认安全策略与防误用设计**
-  
-  公开 API 采用 opaque handle 封装，并在高层流程中默认要求可信 CA、非吊销证据、密钥用途与握手绑定等安全前提；同时提供统一错误映射、显式边界检查以及更易于审计的状态生命周期管理。
-
----
-
-## 快速开始 (Getting Started)
-
-### 环境依赖
-- **编译器**: 支持 C11 标准（GCC / Clang / MSVC）
-- **构建工具**: CMake (>= 3.14)
-- **底层密码库**: OpenSSL (>= 3.0)
-
-### 编译构建
-TinyPKI 使用极简无侵入式的 CMake 构建体系，您可以将其直接作为子模块（submodule）集成到您的主项目中：
-
-```bash
-# 获取源码
-git clone https://github.com/kakahuote1/TinyPKI.git
-cd TinyPKI
-
-# 生成配置与编译
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j 4
+```text
+include/                 公开头文件
+src/ecqv/                ECQV 隐式证书实现
+src/revoke/              撤销状态、Merkle 证明和同步逻辑
+src/pki/                 CA/RA 服务端、客户端和证据包主流程
+src/auth/                认证、密钥协商和 AEAD 会话保护
+src/app/                 demo 与 benchmark 程序
+tests/                   单元测试和集成测试
+tools/                   格式检查脚本
+docs/                    安装说明、安全模型和审计记录
 ```
 
-构建完成后，主库静态目标 `tinypki`、场景 demo、benchmark 与各测试目标即已就绪。您可在自己的 `CMakeLists.txt` 中通过 `target_link_libraries(your_app PRIVATE tinypki)` 直接引用。
+## 快速构建
 
----
+依赖：
 
-## 场景演示 (Demos)
+- C11 编译器：GCC、Clang 或 MSVC 兼容工具链
+- CMake 3.14 或更高版本
+- OpenSSL 3.x 开发库
 
-项目中内置了贴近真实业务场景的演练程序，助您快速理解核心 PKI 交互流。编译完毕后可直接执行：
+Linux：
 
-**1. 证书生命周期主链路（签发 / 携带式非吊销证明导出 / 认证 / 撤销拦截）**
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 4
+ctest --test-dir build --output-on-failure
+./build/test_all
+```
+
+Windows MSYS2 UCRT64：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 4
+ctest --test-dir build --output-on-failure
+./build/test_all.exe
+```
+
+更完整的环境说明见 [docs/install.md](docs/install.md)。
+
+## 运行演示
+
+证书生命周期主链路：
+
 ```bash
 cmake --build build --target sm2_test_cert_flow -j 4
 ./build/sm2_test_cert_flow
 ```
 
-**2. Sparse Merkle revocation root、member/absence proof 与 multiproof 压缩演示**
+撤销 Merkle 证明演示：
+
 ```bash
 cmake --build build --target sm2_test_merkle_flow -j 4
 ./build/sm2_test_merkle_flow
 ```
-Windows PowerShell 环境下可使用对应的 `.exe` 后缀。
 
----
+Windows 环境下可使用对应的 `.exe` 后缀。
 
-## 测试验证 (Testing)
+## 测试与基准
 
-当前仓库测试主链路由 `ctest` 与 `test_all` 两个入口组成。按当前基线，`ctest` 拆分为 6 个 suite，`test_all` 聚合执行 108 个用例。
+当前自动化基线包含 6 个 `ctest` suite 和 108 个 `test_all` 聚合用例：
 
-**运行与 CI 相同的格式检查（固定 clang-format 18）：**
+```bash
+ctest --test-dir build --output-on-failure
+./build/test_all
+```
+
+格式检查：
+
 ```bash
 # Windows PowerShell
 ./tools/check_format.ps1
@@ -99,112 +108,61 @@ Windows PowerShell 环境下可使用对应的 `.exe` 后缀。
 bash tools/check_format.sh
 ```
 
-**自动修复格式：**
-```bash
-# Windows PowerShell
-./tools/format.ps1
+能力实验集：
 
-# Linux / CI
-bash tools/format.sh
-```
-
-**运行全量自动化集成测试：**
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-**聚合命令行直观输出验证：**
-```bash
-./build/test_all
-```
-
-**运行载荷 / 时延 benchmark：**
-```bash
-cmake --build build --target sm2_bench_network_overhead -j 4
-./build/sm2_bench_network_overhead
-```
-
-**输出结构化 benchmark 结果：**
-```bash
-./build/sm2_bench_network_overhead ./tmp/bench_network_overhead.json
-```
-
-**运行能力实验集（revocation scaling / epoch cache / multiproof / delta / Zipf workload）：**
 ```bash
 cmake --build build --target sm2_bench_capability_suite -j 4
-./build/sm2_bench_capability_suite
-```
-
-**输出结构化能力实验结果（含 CRL/OCSP/CRLite 对比与同名 Markdown 报告）：**
-```bash
 ./build/sm2_bench_capability_suite ./tmp/bench_capability_suite.json
 ```
 
-Windows PowerShell 环境下可使用对应的 `.exe` 后缀。
+`sm2_bench_capability_suite` 会输出 TinyPKI 主链路结果，并与 CRL、OCSP 和 CRLite 风格级联 Bloom filter 做本地对照。输出 JSON 同时包含固定 seed、commit、平台、编译器、预热轮数、正式测量轮数、median、p95、均值、标准差和稳定性标记。README 不固定写死性能数字，正式数据以当前 commit 运行出的 benchmark 报告为准。
 
-> `bench_capability_suite` 目前同时输出三类结果：
-> TinyPKI 主链路实测、基于 OpenSSL 本地生成并校验的 `CRL/OCSP` 对照基线、以及本地级联 Bloom filter 的 CRLite 风格建模对比。
-> 当指定 JSON 输出路径时，还会自动生成同名 `.md` 表格报告，便于直接查看和写材料。
-> 输出中包含固定数据集 seed、git commit、编译器、系统、预热轮数、正式测量轮数，以及每个计时项的 median、p95、均值、标准差和稳定性标记；后续论文或文档引用数据时应优先使用稳定性标记为 `true` 的结果。
+## 作为依赖使用
 
-> 为方便审计与排查，完整测试已按领域拆分。当前可单独执行：
-> `suite_ecqv`（隐式证书构造与验证）、
-> `suite_revoke`（撤销同步与 BFT 路径）、
-> `suite_auth`（认证与会话保护）、
-> `suite_pki`（服务端 / 客户端主流程与安全策略）、
-> `suite_pki_internal`（PKI 内部一致性与回滚路径）、
-> `suite_merkle`（哈希树证明与压缩）。
->
-> 例如只运行 PKI 相关测试：
-> ```bash
-> ctest --test-dir build -R suite_pki --output-on-failure
-> ```
+TinyPKI 当前提供静态库目标 `tinypki`。在上层项目中可通过 CMake 子目录或子模块方式接入：
 
----
+```cmake
+add_subdirectory(TinyPKI)
+target_link_libraries(your_app PRIVATE tinypki)
+```
 
-## 文档与接口 (Documentation & API)
+推荐从高层 PKI 接口接入，不建议应用代码直接组合内部认证和撤销树原语。
 
-项目文档保持为标准开源项目结构：
+主要公开头文件：
 
-* [LICENSE](LICENSE): Apache-2.0 开源许可证
-* [CHANGELOG.md](CHANGELOG.md): 当前 release-candidate 基线的变更记录
-* [CONTRIBUTING.md](CONTRIBUTING.md): 贡献流程、检查命令和代码风格要求
-* [docs/install.md](docs/install.md): 构建、测试和demo运行说明
-* [SECURITY.md](SECURITY.md): 安全策略、漏洞报告方式和release安全检查
-* [docs/security/threat_model.md](docs/security/threat_model.md): TinyPKI威胁模型
-* [docs/security/security_audit_v0.1.0.md](docs/security/security_audit_v0.1.0.md): v0.1.0安全审计记录
+- `include/sm2_tinypki.h`：推荐的一站式入口。
+- `include/sm2_implicit_cert.h`：ECQV 请求、签发、验证和密钥重构。
+- `include/sm2_revocation.h`：撤销根记录、证明、同步计划和仲裁辅助能力。
+- `include/sm2_pki_transparency.h`：发证透明、统一根记录和 witness policy 类型。
+- `include/sm2_pki_service.h`：面向 CA/RA 服务端的高层接口。
+- `include/sm2_pki_client.h`：面向轻量化设备的高层接口。
+- `include/sm2_auth.h`：公开签名类型和 AEAD 模式常量。
+- `include/sm2_pki_types.h`：统一错误码和公共基础类型。
 
-公开安全接口采用清晰一致的命名空间。接入时，可按能力维度包含对应头文件：
+## 安全边界
 
-* `include/sm2_implicit_cert.h`: ECQV 请求生成、CA 签发、证书验证与终端侧密钥重构
-* `include/sm2_revocation.h`: 撤销状态、根记录、证明数据结构、同步调度、路由、仲裁与BFT辅助能力；原始树构造和证明编码属于库内部实现
-* `include/sm2_pki_transparency.h`: issuance MMR proof、统一 epoch root、witness 签名、append-only 见证状态与 `t-of-n` 见证策略类型
-* `include/sm2_auth.h`: 公开签名类型和AEAD模式常量；具体认证、签名池和握手原语由高层PKI客户端封装
-* `include/sm2_pki_types.h`: 统一PKI错误码和公共基础类型
-* `include/sm2_pki_service.h` / `sm2_pki_client.h`: 面向内存态 CA/RA 服务端与设备侧客户端的高层流程 API（Opaque Handle 隔离），验证路径强制使用 epoch evidence 与客户端级 witness policy
-* `include/sm2_tinypki.h`: 推荐的一站式公开入口，包含上述稳定接口
+TinyPKI 的安全设计默认攻击者可以监听、篡改、重放或延迟网络流量，也可以控制部分边缘节点。验证端不会信任边缘节点直接给出的结论，而是重新计算证明并比对本地可信的 CA 签名根。
 
+仍需由部署环境承担的边界包括：
 
----
+- 私钥长期托管应优先使用安全芯片、可信执行环境或等价硬件能力。
+- 如果攻击者能把设备本地存储整体回滚到旧快照，且设备没有安全计数器、可信时钟或其他不可回滚小状态，纯软件无法证明该快照不是旧状态。
+- TinyPKI 提供面向本项目角色的紧凑发证透明机制，不包含完整 WebPKI CT 生态中的公共日志、浏览器强制策略和独立监控网络。
 
-## English Summary
+更多内容见 [SECURITY.md](SECURITY.md)、[docs/security/threat_model.md](docs/security/threat_model.md) 和 [docs/security/security_audit_v0.1.0.md](docs/security/security_audit_v0.1.0.md)。
 
-**TinyPKI** is a lightweight C11 PKI core for constrained IoT, weakly connected, and edge deployment scenarios. Built on top of OpenSSL EVP with SM2/SM3/SM4, it provides end-to-end flows for ECQV implicit certificates, CA-signed epoch evidence bundles, path-compressed sparse Merkle non-revocation proofs, MMR-based mandatory issuance transparency, edge witness thresholds, and high-level PKI/auth/session APIs.
+## 项目文档
 
-- **ECQV Implicit Certificate Flows** covering request generation, CA issuance, endpoint key reconstruction, and certificate verification with substantially smaller payloads than conventional X.509.
-- **Measured Footprint Snapshot**: the in-repo capability benchmark reports the final epoch-bundle authentication payload, including ECQV certificate, signature, CA-signed epoch root, sparse revocation proof, issuance MMR proof, and witness signatures.
-- **CA-Signed Epoch Evidence and Carried Proofs** supporting exact offline non-revocation checks via path-compressed sparse absence proofs bound to the same checkpoint as issuance transparency.
-- **Mandatory Issuance Transparency and Unified Epoch Evidence** using 32-byte certificate commitments, an append-only MMR issuance log, a CA-signed epoch root that binds issuance and revocation roots, and client-level `t-of-n` edge witness policies.
-- **Revocation State Sync Tooling** including CRL-style `nextUpdate`
-  publication planning, delta/heartbeat refresh, low-frequency full
-  checkpoints, redirect hints, quorum/BFT helpers, multiproof compression, and
-  epoch/cached proof support.
-- **Mutual Authentication and Secure Sessions** spanning static or ephemeral key agreement, canonical handshake binding, key-usage enforcement, and SM4-GCM/CCM AEAD protection.
-- **Misuse-Resistant High-Level APIs** built around opaque handles, secure defaults, unified error mapping, and a current automated test baseline of 108 cases across `ctest` and `test_all`.
+- [CHANGELOG.md](CHANGELOG.md)：当前 release-candidate 基线变更记录。
+- [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程、检查命令和代码风格要求。
+- [docs/install.md](docs/install.md)：构建、测试和 demo 运行说明。
+- [SECURITY.md](SECURITY.md)：安全策略和漏洞报告流程。
+- [docs/security/threat_model.md](docs/security/threat_model.md)：威胁模型。
+- [docs/security/security_audit_v0.1.0.md](docs/security/security_audit_v0.1.0.md)：安全审计记录。
 
-## 开源许可证 (License)
+## License
 
-本项目遵循自由、开源协议基准，采用 [Apache License 2.0](LICENSE) 授权。
+TinyPKI is licensed under the [Apache License 2.0](LICENSE).
 
 ## Star History
 
