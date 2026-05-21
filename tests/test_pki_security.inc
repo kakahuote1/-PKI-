@@ -2317,6 +2317,7 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     TEST_ASSERT(sm2_pki_service_get_epoch_root_record(service, &root_ab)
             == SM2_PKI_SUCCESS,
         "Get AB Epoch Root");
+    uint64_t root_ab_now = root_ab.valid_from;
     sm2_pki_issuance_commitment_t commitments[4];
     size_t commitment_count = 0;
     TEST_ASSERT(sm2_pki_service_export_issuance_commitments(
@@ -2337,7 +2338,7 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     sm2_pki_epoch_witness_state_init(&witness_state);
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &root_ab,
-            &ca_pub, base_now, commitments, commitment_count, witness_id,
+            &ca_pub, root_ab_now, commitments, commitment_count, witness_id,
             sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_SUCCESS,
         "Initial Append-Only Witness Sign");
@@ -2351,7 +2352,7 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     sm2_pki_epoch_root_record_t rollback_root = root_ab;
     rollback_root.epoch_version--;
     TEST_ASSERT(sm2_pki_epoch_witness_sign_append_only(&witness_state,
-                    &rollback_root, &ca_pub, base_now, NULL, 0, witness_id,
+                    &rollback_root, &ca_pub, root_ab_now, NULL, 0, witness_id,
                     sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_ERR_VERIFY,
         "Reject Rollback Epoch");
@@ -2364,6 +2365,7 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     TEST_ASSERT(sm2_pki_service_get_epoch_root_record(service, &root_abc)
             == SM2_PKI_SUCCESS,
         "Get ABC Epoch Root");
+    uint64_t root_abc_now = root_abc.valid_from;
     size_t append_count = 0;
     TEST_ASSERT(sm2_pki_service_export_issuance_commitments(
                     service, commitment_count, commitments, 4, &append_count)
@@ -2374,14 +2376,14 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     commitments[0][0] ^= 0x01U;
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &root_abc,
-            &ca_pub, base_now, commitments, append_count, witness_id,
+            &ca_pub, root_abc_now, commitments, append_count, witness_id,
             sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_ERR_VERIFY,
         "Reject Tampered Append Batch");
     commitments[0][0] ^= 0x01U;
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &root_abc,
-            &ca_pub, base_now, commitments, append_count, witness_id,
+            &ca_pub, root_abc_now, commitments, append_count, witness_id,
             sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_SUCCESS,
         "Accept Append Batch");
@@ -2396,7 +2398,7 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     sm2_pki_epoch_witness_state_t tampered_frontier = witness_state;
     tampered_frontier.issuance_frontier.peak_hashes[0][0] ^= 0x01U;
     TEST_ASSERT(sm2_pki_epoch_witness_sign_append_only(&tampered_frontier,
-                    &root_abc, &ca_pub, base_now, NULL, 0, witness_id,
+                    &root_abc, &ca_pub, root_abc_now, NULL, 0, witness_id,
                     sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_ERR_VERIFY,
         "Reject Tampered Witness Frontier");
@@ -3045,9 +3047,10 @@ static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
                     service, 0, commitments, 8, &commitment_count)
             == SM2_PKI_SUCCESS,
         "Export Initial Epoch Commitments");
+    uint64_t epoch_root_now = epoch_root.valid_from;
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &epoch_root,
-            &ca_pub, auth_now, commitments, commitment_count, witness_id,
+            &ca_pub, epoch_root_now, commitments, commitment_count, witness_id,
             sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_SUCCESS,
         "Epoch Witness Initial Sign");
@@ -3060,6 +3063,7 @@ static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
     TEST_ASSERT(sm2_pki_service_get_epoch_root_record(service, &appended_epoch)
             == SM2_PKI_SUCCESS,
         "Get Appended Epoch Root");
+    uint64_t appended_epoch_now = appended_epoch.valid_from;
     size_t append_count = 0;
     TEST_ASSERT(sm2_pki_service_export_issuance_commitments(
                     service, commitment_count, commitments, 8, &append_count)
@@ -3069,14 +3073,14 @@ static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
     commitments[0][0] ^= 0x01U;
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &appended_epoch,
-            &ca_pub, auth_now, commitments, append_count, witness_id,
+            &ca_pub, appended_epoch_now, commitments, append_count, witness_id,
             sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_ERR_VERIFY,
         "Epoch Witness Rejects Tampered Append");
     commitments[0][0] ^= 0x01U;
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &appended_epoch,
-            &ca_pub, auth_now, commitments, append_count, witness_id,
+            &ca_pub, appended_epoch_now, commitments, append_count, witness_id,
             sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_SUCCESS,
         "Epoch Witness Accepts Append");
@@ -3090,10 +3094,11 @@ static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
     TEST_ASSERT(sm2_pki_service_get_epoch_root_record(service, &rev_only_epoch)
             == SM2_PKI_SUCCESS,
         "Get Rev-Only Epoch Root");
+    uint64_t rev_only_epoch_now = rev_only_epoch.valid_from;
     TEST_ASSERT(
         sm2_pki_epoch_witness_sign_append_only(&witness_state, &rev_only_epoch,
-            &ca_pub, auth_now + 10, NULL, 0, witness_id, sizeof(witness_id) - 1,
-            &witness_priv, &witness_sig)
+            &ca_pub, rev_only_epoch_now, NULL, 0, witness_id,
+            sizeof(witness_id) - 1, &witness_priv, &witness_sig)
             == SM2_PKI_SUCCESS,
         "Epoch Witness Accepts Rev-Only Advance");
 
