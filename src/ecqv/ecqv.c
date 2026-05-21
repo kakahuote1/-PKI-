@@ -8,6 +8,8 @@
  */
 
 #include "sm2_implicit_cert.h"
+#include "sm2_secure_mem.h"
+#include <limits.h>
 #include <string.h>
 #include <openssl/evp.h>
 #include <openssl/ec.h>
@@ -24,14 +26,15 @@ static BIGNUM *utils_bin_to_bn(const uint8_t *buf, size_t len)
     return BN_bin2bn(buf, len, NULL);
 }
 
-static void utils_bn_to_bin(const BIGNUM *bn, uint8_t *buf, size_t len)
+static sm2_ic_error_t utils_bn_to_bin(
+    const BIGNUM *bn, uint8_t *buf, size_t len)
 {
-    int num_bytes = BN_num_bytes(bn);
-    int offset = len - num_bytes;
-    if (offset < 0)
-        offset = 0;
+    if (!bn || !buf || len == 0 || len > INT_MAX)
+        return SM2_IC_ERR_PARAM;
+
     memset(buf, 0, len);
-    BN_bn2bin(bn, buf + offset);
+    return BN_bn2binpad(bn, buf, (int)len) == (int)len ? SM2_IC_SUCCESS
+                                                       : SM2_IC_ERR_VERIFY;
 }
 
 static EC_GROUP *utils_get_sm2_group()
@@ -398,7 +401,9 @@ sm2_ic_error_t sm2_ic_create_cert_request(sm2_ic_cert_request_t *request,
         goto clean_up;
 
     /* Export Results */
-    utils_bn_to_bin(x, temp_private_key->d, 32);
+    ret = utils_bn_to_bin(x, temp_private_key->d, 32);
+    if (ret != SM2_IC_SUCCESS)
+        goto clean_up;
 
     uint8_t point_buf[65];
     if (EC_POINT_point2oct(group, X, POINT_CONVERSION_UNCOMPRESSED, point_buf,
@@ -416,6 +421,8 @@ sm2_ic_error_t sm2_ic_create_cert_request(sm2_ic_cert_request_t *request,
     ret = SM2_IC_SUCCESS;
 
 clean_up:
+    if (ret != SM2_IC_SUCCESS)
+        sm2_secure_memzero(temp_private_key, sizeof(*temp_private_key));
     BN_clear_free(x);
     EC_POINT_free(X);
     EC_GROUP_free(group);
@@ -568,7 +575,9 @@ sm2_ic_error_t sm2_ic_ca_generate_cert_with_ctx(sm2_ic_cert_result_t *result,
     if (BN_mod_add(s, tmp, d_ca, order, ctx) != 1)
         goto clean_up;
 
-    utils_bn_to_bin(s, result->private_recon_value, 32);
+    ret = utils_bn_to_bin(s, result->private_recon_value, 32);
+    if (ret != SM2_IC_SUCCESS)
+        goto clean_up;
     ret = SM2_IC_SUCCESS;
 
 clean_up:
@@ -637,7 +646,9 @@ sm2_ic_error_t sm2_ic_reconstruct_keys(sm2_private_key_t *private_key,
     if (BN_mod_add(d_u, tmp, s, order, ctx) != 1)
         goto clean_up;
 
-    utils_bn_to_bin(d_u, private_key->d, 32);
+    ret = utils_bn_to_bin(d_u, private_key->d, 32);
+    if (ret != SM2_IC_SUCCESS)
+        goto clean_up;
 
     /* 3. Derived User Public Key: Q_U = d_U * G */
     if (EC_POINT_mul(group, Q, d_u, NULL, NULL, ctx) != 1)
@@ -657,7 +668,7 @@ sm2_ic_error_t sm2_ic_reconstruct_keys(sm2_private_key_t *private_key,
 clean_up:
     if (ret != SM2_IC_SUCCESS)
     {
-        memset(private_key, 0, sizeof(*private_key));
+        sm2_secure_memzero(private_key, sizeof(*private_key));
         memset(public_key, 0, sizeof(*public_key));
     }
     EC_GROUP_free(group);
@@ -803,6 +814,11 @@ static size_t utils_cbor_head_len(uint64_t val)
     return 9;
 }
 
+static bool utils_cbor_has_space(size_t offset, size_t need, size_t cap)
+{
+    return offset <= cap && need <= cap - offset;
+}
+
 static sm2_ic_error_t utils_cbor_read_head(const uint8_t *buf, size_t len,
     size_t *offset, uint8_t expected_major, uint64_t *val)
 {
@@ -823,20 +839,20 @@ static sm2_ic_error_t utils_cbor_read_head(const uint8_t *buf, size_t len,
     }
     else if (info == 24)
     {
-        if (*offset + 1 > len)
+        if (len - *offset < 1U)
             return SM2_IC_ERR_CBOR;
         *val = buf[(*offset)++];
     }
     else if (info == 25)
     {
-        if (*offset + 2 > len)
+        if (len - *offset < 2U)
             return SM2_IC_ERR_CBOR;
         *val = ((uint64_t)buf[*offset] << 8) | buf[*offset + 1];
         (*offset) += 2;
     }
     else if (info == 26)
     {
-        if (*offset + 4 > len)
+        if (len - *offset < 4U)
             return SM2_IC_ERR_CBOR;
         *val = 0;
         for (int i = 0; i < 4; i++)
@@ -844,7 +860,7 @@ static sm2_ic_error_t utils_cbor_read_head(const uint8_t *buf, size_t len,
     }
     else if (info == 27)
     {
-        if (*offset + 8 > len)
+        if (len - *offset < 8U)
             return SM2_IC_ERR_CBOR;
         *val = 0;
         for (int i = 0; i < 8; i++)
@@ -889,27 +905,29 @@ sm2_ic_error_t sm2_ic_cbor_encode_cert(
     const size_t cap = *output_len;
     size_t offset = 0;
 
-    if (offset + utils_cbor_head_len(array_len) > cap)
+    if (!utils_cbor_has_space(offset, utils_cbor_head_len(array_len), cap))
         return SM2_IC_ERR_MEMORY;
     utils_cbor_write_head(output, &offset, 4, array_len);
 
-    if (offset + utils_cbor_head_len(cert->type) > cap)
+    if (!utils_cbor_has_space(offset, utils_cbor_head_len(cert->type), cap))
         return SM2_IC_ERR_MEMORY;
     utils_cbor_write_head(output, &offset, 0, cert->type);
 
-    if (offset + utils_cbor_head_len(cert->serial_number) > cap)
+    if (!utils_cbor_has_space(
+            offset, utils_cbor_head_len(cert->serial_number), cap))
         return SM2_IC_ERR_MEMORY;
     utils_cbor_write_head(output, &offset, 0, cert->serial_number);
 
-    if (offset + utils_cbor_head_len(mask) > cap)
+    if (!utils_cbor_has_space(offset, utils_cbor_head_len(mask), cap))
         return SM2_IC_ERR_MEMORY;
     utils_cbor_write_head(output, &offset, 0, mask);
 
     if (utils_field_enabled(mask, SM2_IC_FIELD_SUBJECT_ID))
     {
-        if (offset + utils_cbor_head_len(cert->subject_id_len)
-                + cert->subject_id_len
-            > cap)
+        const size_t head_len = utils_cbor_head_len(cert->subject_id_len);
+        if (!utils_cbor_has_space(offset, head_len, cap)
+            || !utils_cbor_has_space(
+                offset + head_len, cert->subject_id_len, cap))
             return SM2_IC_ERR_MEMORY;
         utils_cbor_write_head(output, &offset, 2, cert->subject_id_len);
         memcpy(output + offset, cert->subject_id, cert->subject_id_len);
@@ -918,9 +936,10 @@ sm2_ic_error_t sm2_ic_cbor_encode_cert(
 
     if (utils_field_enabled(mask, SM2_IC_FIELD_ISSUER_ID))
     {
-        if (offset + utils_cbor_head_len(cert->issuer_id_len)
-                + cert->issuer_id_len
-            > cap)
+        const size_t head_len = utils_cbor_head_len(cert->issuer_id_len);
+        if (!utils_cbor_has_space(offset, head_len, cap)
+            || !utils_cbor_has_space(
+                offset + head_len, cert->issuer_id_len, cap))
             return SM2_IC_ERR_MEMORY;
         utils_cbor_write_head(output, &offset, 2, cert->issuer_id_len);
         memcpy(output + offset, cert->issuer_id, cert->issuer_id_len);
@@ -929,28 +948,33 @@ sm2_ic_error_t sm2_ic_cbor_encode_cert(
 
     if (utils_field_enabled(mask, SM2_IC_FIELD_VALID_FROM))
     {
-        if (offset + utils_cbor_head_len(cert->valid_from) > cap)
+        if (!utils_cbor_has_space(
+                offset, utils_cbor_head_len(cert->valid_from), cap))
             return SM2_IC_ERR_MEMORY;
         utils_cbor_write_head(output, &offset, 0, cert->valid_from);
     }
 
     if (utils_field_enabled(mask, SM2_IC_FIELD_VALID_DURATION))
     {
-        if (offset + utils_cbor_head_len(cert->valid_duration) > cap)
+        if (!utils_cbor_has_space(
+                offset, utils_cbor_head_len(cert->valid_duration), cap))
             return SM2_IC_ERR_MEMORY;
         utils_cbor_write_head(output, &offset, 0, cert->valid_duration);
     }
 
     if (utils_field_enabled(mask, SM2_IC_FIELD_KEY_USAGE))
     {
-        if (offset + utils_cbor_head_len(cert->key_usage) > cap)
+        if (!utils_cbor_has_space(
+                offset, utils_cbor_head_len(cert->key_usage), cap))
             return SM2_IC_ERR_MEMORY;
         utils_cbor_write_head(output, &offset, 0, cert->key_usage);
     }
 
-    if (offset + utils_cbor_head_len(SM2_COMPRESSED_KEY_LEN)
-            + SM2_COMPRESSED_KEY_LEN
-        > cap)
+    const size_t public_key_head_len
+        = utils_cbor_head_len(SM2_COMPRESSED_KEY_LEN);
+    if (!utils_cbor_has_space(offset, public_key_head_len, cap)
+        || !utils_cbor_has_space(
+            offset + public_key_head_len, SM2_COMPRESSED_KEY_LEN, cap))
         return SM2_IC_ERR_MEMORY;
     utils_cbor_write_head(output, &offset, 2, SM2_COMPRESSED_KEY_LEN);
     memcpy(output + offset, cert->public_recon_key, SM2_COMPRESSED_KEY_LEN);
@@ -1006,10 +1030,10 @@ sm2_ic_error_t sm2_ic_cbor_decode_cert(
         if (utils_cbor_read_head(input, input_len, &offset, 2, &val)
             != SM2_IC_SUCCESS)
             return SM2_IC_ERR_CBOR;
-        cert->subject_id_len = (size_t)val;
-        if (cert->subject_id_len > sizeof(cert->subject_id))
+        if (val > sizeof(cert->subject_id))
             return SM2_IC_ERR_CBOR;
-        if (offset + cert->subject_id_len > input_len)
+        cert->subject_id_len = (size_t)val;
+        if (input_len - offset < cert->subject_id_len)
             return SM2_IC_ERR_CBOR;
         memcpy(cert->subject_id, input + offset, cert->subject_id_len);
         offset += cert->subject_id_len;
@@ -1020,10 +1044,10 @@ sm2_ic_error_t sm2_ic_cbor_decode_cert(
         if (utils_cbor_read_head(input, input_len, &offset, 2, &val)
             != SM2_IC_SUCCESS)
             return SM2_IC_ERR_CBOR;
-        cert->issuer_id_len = (size_t)val;
-        if (cert->issuer_id_len > sizeof(cert->issuer_id))
+        if (val > sizeof(cert->issuer_id))
             return SM2_IC_ERR_CBOR;
-        if (offset + cert->issuer_id_len > input_len)
+        cert->issuer_id_len = (size_t)val;
+        if (input_len - offset < cert->issuer_id_len)
             return SM2_IC_ERR_CBOR;
         memcpy(cert->issuer_id, input + offset, cert->issuer_id_len);
         offset += cert->issuer_id_len;
@@ -1061,7 +1085,7 @@ sm2_ic_error_t sm2_ic_cbor_decode_cert(
             != SM2_IC_SUCCESS
         || val != SM2_COMPRESSED_KEY_LEN)
         return SM2_IC_ERR_CBOR;
-    if (offset + SM2_COMPRESSED_KEY_LEN > input_len)
+    if (input_len - offset < SM2_COMPRESSED_KEY_LEN)
         return SM2_IC_ERR_CBOR;
     memcpy(cert->public_recon_key, input + offset, SM2_COMPRESSED_KEY_LEN);
     offset += SM2_COMPRESSED_KEY_LEN;

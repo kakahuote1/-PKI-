@@ -3871,7 +3871,8 @@ sm2_pki_error_t sm2_pki_epoch_quorum_check(
     const sm2_pki_epoch_root_vote_t *votes, size_t vote_count, size_t threshold,
     sm2_pki_epoch_quorum_result_t *result)
 {
-    if (!votes || threshold == 0 || !result)
+    if (!votes || vote_count == 0 || vote_count > SM2_REV_QUORUM_MAX_VOTES
+        || threshold == 0 || !result)
         return SM2_PKI_ERR_PARAM;
     if (vote_count > SIZE_MAX / sizeof(sm2_rev_quorum_vote_t))
         return SM2_PKI_ERR_MEMORY;
@@ -4104,6 +4105,8 @@ sm2_pki_error_t sm2_pki_key_agreement(sm2_pki_client_ctx_t *ctx,
 {
     sm2_pki_error_t policy_ret = pki_client_require_local_key_agreement(ctx);
     sm2_pki_client_state_t *state = pki_client_state(ctx);
+    if (session_key && session_key_len > 0)
+        sm2_secure_memzero(session_key, session_key_len);
     if (policy_ret != SM2_PKI_SUCCESS)
         return policy_ret;
     return sm2_pki_error_from_ic(sm2_auth_derive_session_key(
@@ -4129,6 +4132,7 @@ sm2_pki_error_t sm2_pki_secure_session_establish(sm2_pki_client_ctx_t *ctx,
     {
         return SM2_PKI_ERR_PARAM;
     }
+    sm2_secure_memzero(session_key, session_key_len);
 
     sm2_pki_error_t ret = pki_client_require_local_key_agreement(ctx);
     if (ret != SM2_PKI_SUCCESS)

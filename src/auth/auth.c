@@ -24,22 +24,19 @@ typedef struct
     EVP_PKEY *pkey;
 } verify_key_cache_t;
 
-static void utils_bn_to_fixed_bin(const BIGNUM *value, uint8_t out[SM2_KEY_LEN])
+static sm2_ic_error_t utils_bn_to_fixed_bin(
+    const BIGNUM *value, uint8_t out[SM2_KEY_LEN])
 {
     if (!out)
-        return;
+        return SM2_IC_ERR_PARAM;
 
     memset(out, 0, SM2_KEY_LEN);
     if (!value)
-        return;
+        return SM2_IC_ERR_PARAM;
 
-    int value_len = BN_num_bytes(value);
-    if (value_len <= 0)
-        return;
-    if (value_len > SM2_KEY_LEN)
-        value_len = SM2_KEY_LEN;
-
-    BN_bn2bin(value, out + (SM2_KEY_LEN - value_len));
+    return BN_bn2binpad(value, out, SM2_KEY_LEN) == SM2_KEY_LEN
+        ? SM2_IC_SUCCESS
+        : SM2_IC_ERR_VERIFY;
 }
 
 static sm2_ic_error_t utils_point_is_valid(
@@ -134,8 +131,9 @@ static sm2_ic_error_t utils_generate_sm2_private_scalar(
         if (BN_is_zero(scalar))
             continue;
 
-        utils_bn_to_fixed_bin(scalar, private_key->d);
-        ret = SM2_IC_SUCCESS;
+        ret = utils_bn_to_fixed_bin(scalar, private_key->d);
+        if (ret != SM2_IC_SUCCESS)
+            goto cleanup;
         break;
     }
 
@@ -1096,6 +1094,7 @@ sm2_ic_error_t sm2_auth_derive_session_key_static(
     {
         return SM2_IC_ERR_PARAM;
     }
+    sm2_secure_memzero(session_key, session_key_len);
 
     uint8_t shared_xy[64];
     sm2_ic_error_t ret
@@ -1122,6 +1121,8 @@ sm2_ic_error_t sm2_auth_mutual_handshake_static(
     {
         return SM2_IC_ERR_PARAM;
     }
+    sm2_secure_memzero(session_key_a, session_key_len);
+    sm2_secure_memzero(session_key_b, session_key_len);
 
     sm2_ic_error_t ret = sm2_auth_authenticate_request(
         a_to_b, b_trust_store, b_rev_ctx, now_ts, NULL);
@@ -1147,10 +1148,17 @@ sm2_ic_error_t sm2_auth_mutual_handshake_static(
     ret = sm2_auth_derive_session_key_static(
         b_private_key, a_to_b->public_key, session_key_b, session_key_len);
     if (ret != SM2_IC_SUCCESS)
+    {
+        sm2_secure_memzero(session_key_a, session_key_len);
         return ret;
+    }
 
     if (!utils_bytes_equal_ct(session_key_a, session_key_b, session_key_len))
+    {
+        sm2_secure_memzero(session_key_a, session_key_len);
+        sm2_secure_memzero(session_key_b, session_key_len);
         return SM2_IC_ERR_VERIFY;
+    }
     return SM2_IC_SUCCESS;
 }
 
@@ -1194,6 +1202,7 @@ sm2_ic_error_t sm2_auth_derive_session_key(
     }
     if (transcript_len > 0 && !transcript)
         return SM2_IC_ERR_PARAM;
+    sm2_secure_memzero(session_key, session_key_len);
 
     uint8_t shared_ee[64];
     uint8_t shared_mix_a[64];
@@ -1255,6 +1264,8 @@ cleanup:
     sm2_secure_memzero(shared_mix_b, sizeof(shared_mix_b));
     sm2_secure_memzero(shared_mix_a, sizeof(shared_mix_a));
     sm2_secure_memzero(shared_ee, sizeof(shared_ee));
+    if (ret != SM2_IC_SUCCESS)
+        sm2_secure_memzero(session_key, session_key_len);
     return ret;
 }
 
@@ -1277,6 +1288,8 @@ sm2_ic_error_t sm2_auth_mutual_handshake(const sm2_auth_request_t *a_to_b,
     {
         return SM2_IC_ERR_PARAM;
     }
+    sm2_secure_memzero(session_key_a, session_key_len);
+    sm2_secure_memzero(session_key_b, session_key_len);
 
     if (transcript_len > 0 && !transcript)
         return SM2_IC_ERR_PARAM;
@@ -1328,10 +1341,17 @@ sm2_ic_error_t sm2_auth_mutual_handshake(const sm2_auth_request_t *a_to_b,
         a_to_b->public_key, a_ephemeral_public_key, transcript, transcript_len,
         session_key_b, session_key_len);
     if (ret != SM2_IC_SUCCESS)
+    {
+        sm2_secure_memzero(session_key_a, session_key_len);
         return ret;
+    }
 
     if (!utils_bytes_equal_ct(session_key_a, session_key_b, session_key_len))
+    {
+        sm2_secure_memzero(session_key_a, session_key_len);
+        sm2_secure_memzero(session_key_b, session_key_len);
         return SM2_IC_ERR_VERIFY;
+    }
 
     return SM2_IC_SUCCESS;
 }

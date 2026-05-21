@@ -8,6 +8,12 @@
  */
 
 #include "merkle_internal.h"
+
+static bool cbor_space_available(size_t offset, size_t need, size_t capacity)
+{
+    return offset <= capacity && need <= capacity - offset;
+}
+
 sm2_ic_error_t cbor_put_type_value(
     uint8_t major, uint64_t value, uint8_t *out, size_t out_cap, size_t *offset)
 {
@@ -17,20 +23,20 @@ sm2_ic_error_t cbor_put_type_value(
     size_t off = *offset;
     if (value < 24)
     {
-        if (off + 1 > out_cap)
+        if (!cbor_space_available(off, 1U, out_cap))
             return SM2_IC_ERR_CBOR;
         out[off++] = (uint8_t)((major << 5) | (uint8_t)value);
     }
     else if (value <= 0xFFU)
     {
-        if (off + 2 > out_cap)
+        if (!cbor_space_available(off, 2U, out_cap))
             return SM2_IC_ERR_CBOR;
         out[off++] = (uint8_t)((major << 5) | 24U);
         out[off++] = (uint8_t)value;
     }
     else if (value <= 0xFFFFU)
     {
-        if (off + 3 > out_cap)
+        if (!cbor_space_available(off, 3U, out_cap))
             return SM2_IC_ERR_CBOR;
         out[off++] = (uint8_t)((major << 5) | 25U);
         out[off++] = (uint8_t)((value >> 8) & 0xFFU);
@@ -38,7 +44,7 @@ sm2_ic_error_t cbor_put_type_value(
     }
     else if (value <= 0xFFFFFFFFULL)
     {
-        if (off + 5 > out_cap)
+        if (!cbor_space_available(off, 5U, out_cap))
             return SM2_IC_ERR_CBOR;
         out[off++] = (uint8_t)((major << 5) | 26U);
         for (int i = 3; i >= 0; i--)
@@ -46,7 +52,7 @@ sm2_ic_error_t cbor_put_type_value(
     }
     else
     {
-        if (off + 9 > out_cap)
+        if (!cbor_space_available(off, 9U, out_cap))
             return SM2_IC_ERR_CBOR;
         out[off++] = (uint8_t)((major << 5) | 27U);
         for (int i = 7; i >= 0; i--)
@@ -79,14 +85,14 @@ sm2_ic_error_t cbor_get_type_value(const uint8_t *in, size_t in_len,
 
     if (add == 24)
     {
-        if (*offset + 1 > in_len)
+        if (!cbor_space_available(*offset, 1U, in_len))
             return SM2_IC_ERR_CBOR;
         *value = in[(*offset)++];
         return SM2_IC_SUCCESS;
     }
     if (add == 25)
     {
-        if (*offset + 2 > in_len)
+        if (!cbor_space_available(*offset, 2U, in_len))
             return SM2_IC_ERR_CBOR;
         *value = ((uint64_t)in[*offset] << 8) | (uint64_t)in[*offset + 1];
         *offset += 2;
@@ -94,7 +100,7 @@ sm2_ic_error_t cbor_get_type_value(const uint8_t *in, size_t in_len,
     }
     if (add == 26)
     {
-        if (*offset + 4 > in_len)
+        if (!cbor_space_available(*offset, 4U, in_len))
             return SM2_IC_ERR_CBOR;
         uint64_t v = 0;
         for (int i = 0; i < 4; i++)
@@ -105,7 +111,7 @@ sm2_ic_error_t cbor_get_type_value(const uint8_t *in, size_t in_len,
     }
     if (add == 27)
     {
-        if (*offset + 8 > in_len)
+        if (!cbor_space_available(*offset, 8U, in_len))
             return SM2_IC_ERR_CBOR;
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
@@ -126,7 +132,7 @@ sm2_ic_error_t cbor_put_bytes(const uint8_t *data, size_t data_len,
     if (ret != SM2_IC_SUCCESS)
         return ret;
 
-    if (*offset + data_len > out_cap)
+    if (!cbor_space_available(*offset, data_len, out_cap))
         return SM2_IC_ERR_CBOR;
     memcpy(out + *offset, data, data_len);
     *offset += data_len;
@@ -148,7 +154,7 @@ sm2_ic_error_t cbor_get_bytes(const uint8_t *in, size_t in_len, size_t *offset,
         return SM2_IC_ERR_CBOR;
 
     size_t len = (size_t)len64;
-    if (*offset + len > in_len)
+    if (!cbor_space_available(*offset, len, in_len))
         return SM2_IC_ERR_CBOR;
     if (!out || out_len < len)
         return SM2_IC_ERR_CBOR;
@@ -165,7 +171,7 @@ sm2_ic_error_t cbor_put_bool(
 {
     if (!out || !offset)
         return SM2_IC_ERR_PARAM;
-    if (*offset + 1 > out_cap)
+    if (!cbor_space_available(*offset, 1U, out_cap))
         return SM2_IC_ERR_CBOR;
 
     out[*offset] = value ? 0xF5U : 0xF4U;
@@ -200,7 +206,7 @@ sm2_ic_error_t cbor_put_null(uint8_t *out, size_t out_cap, size_t *offset)
 {
     if (!out || !offset)
         return SM2_IC_ERR_PARAM;
-    if (*offset + 1 > out_cap)
+    if (!cbor_space_available(*offset, 1U, out_cap))
         return SM2_IC_ERR_CBOR;
 
     out[*offset] = 0xF6U;
@@ -1296,7 +1302,7 @@ sm2_ic_error_t cbor_get_bytes_alloc(const uint8_t *in, size_t in_len,
         return SM2_IC_ERR_CBOR;
 
     size_t len = (size_t)len64;
-    if (*offset + len > in_len)
+    if (!cbor_space_available(*offset, len, in_len))
         return SM2_IC_ERR_CBOR;
 
     uint8_t *buf = NULL;

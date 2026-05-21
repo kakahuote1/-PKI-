@@ -324,6 +324,14 @@ static void test_auth_revocation_policy_strict_cross_check()
     TEST_PASS();
 }
 
+static int auth_buffer_is_zero(const uint8_t *buf, size_t len)
+{
+    uint8_t acc = 0;
+    for (size_t i = 0; i < len; i++)
+        acc |= buf[i];
+    return acc == 0;
+}
+
 static void test_auth_forward_secure_session_key()
 {
     if (!g_ca_initialized)
@@ -447,12 +455,18 @@ static void test_auth_forward_secure_session_key()
         "Eph B2");
 
     uint8_t sk_a2[16], sk_b2[16];
+    memset(sk_a2, 0xA5, sizeof(sk_a2));
+    memset(sk_b2, 0x5A, sizeof(sk_b2));
     TEST_ASSERT(sm2_auth_mutual_handshake(&a_to_b, &priv_a, &eph_priv_a2,
                     &eph_pub_a2, &trust_b, NULL, &b_to_a, &priv_b, &eph_priv_b2,
                     &eph_pub_b2, &trust_a, NULL, now, transcript1,
                     sizeof(transcript1) - 1, sk_a2, sk_b2, sizeof(sk_a2))
             == SM2_IC_ERR_VERIFY,
         "Reject Stale Handshake Binding");
+    TEST_ASSERT(auth_buffer_is_zero(sk_a2, sizeof(sk_a2)),
+        "Failed Handshake Clears A Key");
+    TEST_ASSERT(auth_buffer_is_zero(sk_b2, sizeof(sk_b2)),
+        "Failed Handshake Clears B Key");
     uint8_t bind_a2[256];
     uint8_t bind_b2[256];
     size_t bind_a2_len = sizeof(bind_a2);

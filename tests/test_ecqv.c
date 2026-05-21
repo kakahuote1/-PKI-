@@ -218,6 +218,22 @@ static void test_cbor_robustness()
             "Oversize Subject Must Fail");
     }
 
+    uint8_t huge_len[128];
+    o = 0;
+    huge_len[o++] = 0x85; /* array(5): type, serial, mask, subject, V */
+    huge_len[o++] = 0x01; /* type */
+    huge_len[o++] = 0x01; /* serial */
+    huge_len[o++] = 0x01; /* field_mask=SM2_IC_FIELD_SUBJECT_ID */
+    huge_len[o++] = 0x5B; /* byte string with 8-byte length */
+    memset(huge_len + o, 0xFF, 8);
+    o += 8;
+    {
+        sm2_implicit_cert_t out;
+        TEST_ASSERT(
+            sm2_ic_cbor_decode_cert(&out, huge_len, o) == SM2_IC_ERR_CBOR,
+            "Huge Subject Length Must Fail");
+    }
+
     TEST_PASS();
 }
 

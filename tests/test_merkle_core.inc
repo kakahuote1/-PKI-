@@ -143,6 +143,17 @@ static void test_rev_root_signature_and_light_verify()
         sm2_rev_root_decode(&root_dec, root_buf, root_len) == SM2_IC_SUCCESS,
         "Root CBOR Decode");
 
+    uint8_t huge_authority_len[16];
+    size_t huge_off = 0;
+    huge_authority_len[huge_off++] = 0x86U; /* array(6) */
+    huge_authority_len[huge_off++] = 0x5BU; /* bytes with 8-byte length */
+    memset(huge_authority_len + huge_off, 0xFF, 8);
+    huge_off += 8;
+    sm2_rev_root_record_t root_bad;
+    TEST_ASSERT(sm2_rev_root_decode(&root_bad, huge_authority_len, huge_off)
+            == SM2_IC_ERR_CBOR,
+        "Huge Root Authority Length Reject");
+
     TEST_ASSERT(
         sm2_rev_root_verify(&root_dec, 1500, merkle_ca_verify_cb, &sig_ctx)
             == SM2_IC_SUCCESS,

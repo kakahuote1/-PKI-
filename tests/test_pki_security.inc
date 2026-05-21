@@ -2433,6 +2433,13 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
 
     sm2_pki_epoch_quorum_result_t quorum;
     TEST_ASSERT(
+        sm2_pki_epoch_quorum_check(votes, 0, 2, &quorum) == SM2_PKI_ERR_PARAM,
+        "Reject Empty Epoch Quorum");
+    TEST_ASSERT(sm2_pki_epoch_quorum_check(votes, SM2_REV_QUORUM_MAX_VOTES + 1,
+                    2, &quorum)
+            == SM2_PKI_ERR_PARAM,
+        "Reject Oversize Epoch Quorum");
+    TEST_ASSERT(
         sm2_pki_epoch_quorum_check(votes, 3, 2, &quorum) == SM2_PKI_ERR_VERIFY,
         "Quorum Detects Fork");
     TEST_ASSERT(quorum.fork_detected, "Fork Flag Set");
