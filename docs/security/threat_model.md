@@ -82,5 +82,6 @@ already present in memory.
 
 ## Release Baseline
 
-The release-candidate baseline is the `main` branch commit that contains this
-document and the accompanying secure-context hardening changes.
+The `v0.1.0` baseline is the release tag and the corresponding `main` history
+that contain this document and the accompanying secure-context hardening
+changes.

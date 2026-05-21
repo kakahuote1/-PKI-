@@ -2,13 +2,13 @@
 
 ## Supported Versions
 
-TinyPKI is still pre-release. Security fixes are accepted on `main` and will be
-carried into the next release tag.
+TinyPKI accepts security fixes on `main` and carries them into supported
+release tags.
 
 | Version | Supported |
 | --- | --- |
 | `main` | Yes |
-| `v0.1.x` | Yes, after the first release |
+| `v0.1.x` | Yes |
 | Older commits | Best effort only |
 
 ## Reporting a Vulnerability

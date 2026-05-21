@@ -4,7 +4,7 @@ Date: 2026-05-21
 
 ## Scope
 
-This audit covers the release-candidate `main` branch for the following areas:
+This audit covers the `v0.1.0` release baseline for the following areas:
 
 - ECQV certificate request, issuance, reconstruction, and verification.
 - Authentication, key agreement, and secure session establishment.
@@ -79,8 +79,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 At the time this document was added, the baseline passed local format checks,
-build, `ctest`, `test_all`, and benchmark smoke execution. The immediately
-preceding code baseline also passed GitHub Actions on Linux and Windows.
+build, `ctest`, `test_all`, and benchmark smoke execution. The release baseline
+also passed GitHub Actions on Linux and Windows.
 
 ## Residual Risk
 
