@@ -471,6 +471,37 @@ static bool utils_size_to_int(size_t value, int *out)
     return true;
 }
 
+static bool utils_bytes_equal_ct(const uint8_t *a, const uint8_t *b, size_t len)
+{
+    if (!a || !b)
+        return false;
+
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++)
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+static bool utils_bytes_gt_ct(const uint8_t *a, const uint8_t *b, size_t len)
+{
+    if (!a || !b)
+        return false;
+
+    uint8_t gt = 0;
+    uint8_t lt = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        uint32_t ai = a[i];
+        uint32_t bi = b[i];
+        uint8_t ai_lt_bi = (uint8_t)(((ai - bi) >> 8) & 1U);
+        uint8_t bi_lt_ai = (uint8_t)(((bi - ai) >> 8) & 1U);
+        uint8_t undecided = (uint8_t)((gt | lt) ^ 1U);
+        gt |= (uint8_t)(undecided & bi_lt_ai);
+        lt |= (uint8_t)(undecided & ai_lt_bi);
+    }
+    return gt != 0;
+}
+
 static void utils_u64_to_be(uint64_t value, uint8_t out[8])
 {
     if (!out)
@@ -582,8 +613,9 @@ static sm2_ic_error_t auth_require_handshake_binding(const uint8_t *message,
         return ret;
     }
 
-    ret = memcmp(message, expected, expected_len) == 0 ? SM2_IC_SUCCESS
-                                                       : SM2_IC_ERR_VERIFY;
+    ret = utils_bytes_equal_ct(message, expected, expected_len)
+        ? SM2_IC_SUCCESS
+        : SM2_IC_ERR_VERIFY;
     free(expected);
     return ret;
 }
@@ -1117,7 +1149,7 @@ sm2_ic_error_t sm2_auth_mutual_handshake_static(
     if (ret != SM2_IC_SUCCESS)
         return ret;
 
-    if (memcmp(session_key_a, session_key_b, session_key_len) != 0)
+    if (!utils_bytes_equal_ct(session_key_a, session_key_b, session_key_len))
         return SM2_IC_ERR_VERIFY;
     return SM2_IC_SUCCESS;
 }
@@ -1183,7 +1215,7 @@ sm2_ic_error_t sm2_auth_derive_session_key(
 
     const uint8_t *mix_first = shared_mix_a;
     const uint8_t *mix_second = shared_mix_b;
-    if (memcmp(shared_mix_a, shared_mix_b, sizeof(shared_mix_a)) > 0)
+    if (utils_bytes_gt_ct(shared_mix_a, shared_mix_b, sizeof(shared_mix_a)))
     {
         mix_first = shared_mix_b;
         mix_second = shared_mix_a;
@@ -1298,7 +1330,7 @@ sm2_ic_error_t sm2_auth_mutual_handshake(const sm2_auth_request_t *a_to_b,
     if (ret != SM2_IC_SUCCESS)
         return ret;
 
-    if (memcmp(session_key_a, session_key_b, session_key_len) != 0)
+    if (!utils_bytes_equal_ct(session_key_a, session_key_b, session_key_len))
         return SM2_IC_ERR_VERIFY;
 
     return SM2_IC_SUCCESS;

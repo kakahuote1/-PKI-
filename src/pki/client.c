@@ -35,6 +35,9 @@ static bool pki_client_find_trusted_ca_index(
     const sm2_pki_client_state_t *state, const sm2_ec_point_t *ca_public_key,
     size_t *matched_ca_index);
 
+static bool pki_client_bytes_equal_ct(
+    const uint8_t *a, const uint8_t *b, size_t len);
+
 static sm2_ic_error_t pki_client_root_record_verify_cb(void *user_ctx,
     const uint8_t *data, size_t data_len, const uint8_t *signature,
     size_t signature_len)
@@ -582,7 +585,8 @@ static sm2_pki_error_t pki_client_epoch_root_digest_matches(
         = sm2_pki_epoch_root_digest(root_record, actual_digest);
     if (ic_ret != SM2_IC_SUCCESS)
         return sm2_pki_error_from_ic(ic_ret);
-    return memcmp(actual_digest, digest, sizeof(actual_digest)) == 0
+    return pki_client_bytes_equal_ct(
+               actual_digest, digest, sizeof(actual_digest))
         ? SM2_PKI_SUCCESS
         : SM2_PKI_ERR_VERIFY;
 }
@@ -1752,15 +1756,12 @@ static bool pki_client_evidence_cache_hit(sm2_pki_client_state_t *state,
             || memcmp(entry->authority_id, epoch->authority_id,
                    epoch->authority_id_len)
                 != 0
-            || memcmp(entry->cert_commitment, cert_commitment,
-                   SM2_PKI_ISSUANCE_COMMITMENT_LEN)
-                != 0
-            || memcmp(entry->epoch_digest, epoch_digest,
-                   SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
-                != 0
-            || memcmp(entry->proof_digest, proof_digest,
-                   SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
-                != 0
+            || !pki_client_bytes_equal_ct(entry->cert_commitment,
+                cert_commitment, SM2_PKI_ISSUANCE_COMMITMENT_LEN)
+            || !pki_client_bytes_equal_ct(entry->epoch_digest, epoch_digest,
+                SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
+            || !pki_client_bytes_equal_ct(entry->proof_digest, proof_digest,
+                SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
             || entry->epoch_version != epoch->epoch_version
             || entry->revocation_root_version != epoch->revocation_root_version
             || memcmp(entry->revocation_root_hash, epoch->revocation_root_hash,
@@ -2237,9 +2238,8 @@ static sm2_pki_error_t pki_client_verify_issuance_proof_with_epoch(
         = sm2_pki_issuance_cert_commitment(cert, expected_commitment);
     if (ic_ret != SM2_IC_SUCCESS)
         return sm2_pki_error_from_ic(ic_ret);
-    if (memcmp(proof->member_proof.cert_commitment, expected_commitment,
-            sizeof(expected_commitment))
-        != 0)
+    if (!pki_client_bytes_equal_ct(proof->member_proof.cert_commitment,
+            expected_commitment, sizeof(expected_commitment)))
     {
         return SM2_PKI_ERR_VERIFY;
     }

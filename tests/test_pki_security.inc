@@ -3016,6 +3016,13 @@ static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
     TEST_ASSERT(sm2_pki_verify(verifier, &request, auth_now, &matched)
             == SM2_PKI_ERR_VERIFY,
         "Epoch Revocation Root Binding Reject");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(sm2_pki_client_get_last_diagnostic(verifier, &diag)
+            == SM2_PKI_SUCCESS,
+        "Read Revocation Binding Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_EVIDENCE_BINDING_MISMATCH,
+        "Revocation Binding Diagnostic Reason");
 
     sm2_pki_evidence_bundle_t wrong_issuance = bundle;
     wrong_issuance.issuance_proof.member_proof.cert_commitment[0] ^= 0x01U;
@@ -3023,6 +3030,12 @@ static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
     TEST_ASSERT(sm2_pki_verify(verifier, &request, auth_now, &matched)
             == SM2_PKI_ERR_VERIFY,
         "Epoch Issuance Proof Binding Reject");
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(sm2_pki_client_get_last_diagnostic(verifier, &diag)
+            == SM2_PKI_SUCCESS,
+        "Read Issuance Binding Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_EVIDENCE_BINDING_MISMATCH,
+        "Issuance Binding Diagnostic Reason");
     request.evidence_bundle = &bundle;
 
     sm2_private_key_t witness_priv;
