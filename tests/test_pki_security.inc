@@ -1489,7 +1489,7 @@ static void test_phase137_persisted_storage_double_slot_recovery()
     uint64_t selected_sequence = 0;
     TEST_ASSERT(
         sm2_pki_client_persisted_storage_load(&storage, &loaded, device_secret,
-            sizeof(device_secret) - 1, &selected_sequence)
+            sizeof(device_secret) - 1, 0, &selected_sequence)
             == SM2_PKI_SUCCESS,
         "Load Latest State");
     TEST_ASSERT(selected_sequence == 2, "Latest Sequence Selected");
@@ -1520,21 +1520,27 @@ static void test_phase137_persisted_storage_double_slot_recovery()
     selected_sequence = 0;
     TEST_ASSERT(
         sm2_pki_client_persisted_storage_load(&storage, &loaded, device_secret,
-            sizeof(device_secret) - 1, &selected_sequence)
+            sizeof(device_secret) - 1, 0, &selected_sequence)
             == SM2_PKI_SUCCESS,
         "Load Falls Back From Tampered Latest Slot");
     TEST_ASSERT(selected_sequence == 1, "Fallback Sequence Selected");
     TEST_ASSERT(loaded.records[0].highest_seen_epoch_version
             == state_initial.records[0].highest_seen_epoch_version,
         "Fallback Loaded Initial State");
+    selected_sequence = 0;
+    TEST_ASSERT(sm2_pki_client_persisted_storage_load(&storage, &loaded,
+                    device_secret, sizeof(device_secret) - 1, 2,
+                    &selected_sequence)
+            == SM2_PKI_ERR_VERIFY,
+        "Sequence Floor Rejects Rollback Slot");
 
     TEST_ASSERT(sm2_pki_client_persisted_storage_load(&storage, &loaded,
-                    wrong_secret, sizeof(wrong_secret) - 1, NULL)
+                    wrong_secret, sizeof(wrong_secret) - 1, 0, NULL)
             == SM2_PKI_ERR_NOT_FOUND,
         "Wrong Device Secret Rejects Storage");
     storage.slots[older_slot].tag[0] ^= 0x01U;
     TEST_ASSERT(sm2_pki_client_persisted_storage_load(&storage, &loaded,
-                    device_secret, sizeof(device_secret) - 1, NULL)
+                    device_secret, sizeof(device_secret) - 1, 0, NULL)
             == SM2_PKI_ERR_NOT_FOUND,
         "All Invalid Slots Reject");
 

@@ -3469,7 +3469,8 @@ sm2_pki_error_t sm2_pki_client_persisted_storage_store(
 sm2_pki_error_t sm2_pki_client_persisted_storage_load(
     const sm2_pki_client_persisted_storage_t *storage,
     sm2_pki_client_persisted_state_t *state, const uint8_t *device_secret,
-    size_t device_secret_len, uint64_t *selected_sequence)
+    size_t device_secret_len, uint64_t minimum_sequence_floor,
+    uint64_t *selected_sequence)
 {
     if (!storage || !state || !device_secret || device_secret_len == 0)
         return SM2_PKI_ERR_PARAM;
@@ -3492,6 +3493,8 @@ sm2_pki_error_t sm2_pki_client_persisted_storage_load(
     }
     if (selected == SM2_PKI_CLIENT_PERSISTED_STORAGE_SLOT_COUNT)
         return SM2_PKI_ERR_NOT_FOUND;
+    if (highest_sequence < minimum_sequence_floor)
+        return SM2_PKI_ERR_VERIFY;
 
     *state = storage->slots[selected].state;
     if (selected_sequence)
