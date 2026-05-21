@@ -364,7 +364,7 @@ static sm2_ic_error_t utils_ecdh_shared_xy(
     if (!group)
         return SM2_IC_ERR_CRYPTO;
 
-    bn_ctx = BN_CTX_new();
+    bn_ctx = BN_CTX_secure_new();
     d = BN_bin2bn(local_private_key->d, SM2_KEY_LEN, NULL);
     peer = EC_POINT_new(group);
     shared = EC_POINT_new(group);

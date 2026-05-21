@@ -242,7 +242,7 @@ sm2_ic_error_t sm2_ic_sm2_point_mult(sm2_ec_point_t *point,
         return SM2_IC_ERR_PARAM;
 
     EC_GROUP *group = utils_get_sm2_group();
-    BN_CTX *ctx = BN_CTX_new();
+    BN_CTX *ctx = BN_CTX_secure_new();
     BIGNUM *k = utils_bin_to_bn(scalar, scalar_len);
     EC_POINT *R = NULL;
     EC_POINT *P = NULL;
@@ -373,7 +373,7 @@ sm2_ic_error_t sm2_ic_create_cert_request(sm2_ic_cert_request_t *request,
     memset(request, 0, sizeof(*request));
 
     EC_GROUP *group = utils_get_sm2_group();
-    BN_CTX *ctx = BN_CTX_new();
+    BN_CTX *ctx = BN_CTX_secure_new();
 
     /* Generate Ephemeral Keypair (k, R_U) */
     BIGNUM *x = BN_new();
@@ -460,7 +460,7 @@ sm2_ic_error_t sm2_ic_ca_generate_cert_with_ctx(sm2_ic_cert_result_t *result,
         return ret;
 
     EC_GROUP *group = utils_get_sm2_group();
-    BN_CTX *ctx = BN_CTX_new();
+    BN_CTX *ctx = BN_CTX_secure_new();
     const BIGNUM *order = group ? EC_GROUP_get0_order(group) : NULL;
     uint64_t serial = 0;
     BIGNUM *k = BN_new();
@@ -618,7 +618,7 @@ sm2_ic_error_t sm2_ic_reconstruct_keys(sm2_private_key_t *private_key,
     memset(private_key, 0, sizeof(*private_key));
     memset(public_key, 0, sizeof(*public_key));
     EC_GROUP *group = utils_get_sm2_group();
-    BN_CTX *ctx = BN_CTX_new();
+    BN_CTX *ctx = BN_CTX_secure_new();
     const BIGNUM *order = group ? EC_GROUP_get0_order(group) : NULL;
 
     BIGNUM *x = utils_bin_to_bn(temp_private_key->d, 32);
