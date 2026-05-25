@@ -2457,38 +2457,14 @@ static void test_phase142_epoch_witness_append_only_and_quorum()
     TEST_PASS();
 }
 
-static int pki_build_forked_revocation_checkpoint(
-    sm2_pki_service_ctx_t *service, const sm2_ec_point_t *ca_public_key,
-    const sm2_pki_epoch_checkpoint_t *base, sm2_pki_epoch_checkpoint_t *forked)
+static int pki_sign_checkpoint_with_witnesses(sm2_pki_service_ctx_t *service,
+    const sm2_ec_point_t *ca_public_key, sm2_pki_epoch_checkpoint_t *checkpoint,
+    const uint8_t *const *witness_ids, const size_t *witness_id_lens,
+    const sm2_private_key_t *witness_private_keys, size_t witness_count)
 {
-    if (!service || !ca_public_key || !base || !forked
-        || !pki_default_transparency_policy_init())
-    {
-        return 0;
-    }
-
-    memset(forked, 0, sizeof(*forked));
-    uint8_t forked_revocation_hash[SM2_REV_MERKLE_HASH_LEN];
-    memcpy(forked_revocation_hash, base->epoch_root_record.revocation_root_hash,
-        sizeof(forked_revocation_hash));
-    forked_revocation_hash[0] ^= 0xA5U;
-
-    pki_merkle_sign_ctx_t sign_ctx = { &service->ca_private_key };
-    if (sm2_pki_epoch_root_sign(base->epoch_root_record.authority_id,
-            base->epoch_root_record.authority_id_len,
-            base->epoch_root_record.epoch_version,
-            base->epoch_root_record.revocation_root_version,
-            forked_revocation_hash,
-            base->epoch_root_record.issuance_root_version,
-            base->epoch_root_record.issuance_root_hash,
-            base->epoch_root_record.witness_policy_version,
-            base->epoch_root_record.witness_policy_hash,
-            base->epoch_root_record.sync_policy_version,
-            base->epoch_root_record.sync_policy_hash,
-            base->epoch_root_record.valid_from,
-            base->epoch_root_record.valid_until, pki_merkle_sign_cb, &sign_ctx,
-            &forked->epoch_root_record)
-        != SM2_IC_SUCCESS)
+    if (!service || !ca_public_key || !checkpoint || !witness_ids
+        || !witness_id_lens || !witness_private_keys || witness_count == 0
+        || witness_count > SM2_PKI_TRANSPARENCY_MAX_WITNESSES)
     {
         return 0;
     }
@@ -2510,8 +2486,8 @@ static int pki_build_forked_revocation_checkpoint(
             return 0;
 
         size_t exported_count = 0;
-        if (sm2_pki_service_export_issuance_commitments(
-                service, 0, commitments, commitment_count, &exported_count)
+        if (sm2_pki_service_export_issuance_commitments(service, 0,
+                commitments, commitment_count, &exported_count)
                 != SM2_PKI_SUCCESS
             || exported_count != commitment_count)
         {
@@ -2520,20 +2496,66 @@ static int pki_build_forked_revocation_checkpoint(
         }
     }
 
-    sm2_pki_epoch_witness_state_t witness_state;
-    sm2_pki_epoch_witness_state_init(&witness_state);
-    sm2_pki_error_t ret = sm2_pki_epoch_witness_sign_append_only(&witness_state,
-        &forked->epoch_root_record, ca_public_key,
-        forked->epoch_root_record.valid_from, commitments, commitment_count,
-        g_pki_default_witness.witness_id, g_pki_default_witness.witness_id_len,
-        &g_pki_default_witness_priv, &forked->witness_signatures[0]);
-    sm2_pki_epoch_witness_state_cleanup(&witness_state);
+    for (size_t i = 0; i < witness_count; i++)
+    {
+        sm2_pki_epoch_witness_state_t witness_state;
+        sm2_pki_epoch_witness_state_init(&witness_state);
+        sm2_pki_error_t ret = sm2_pki_epoch_witness_sign_append_only(
+            &witness_state, &checkpoint->epoch_root_record, ca_public_key,
+            checkpoint->epoch_root_record.valid_from, commitments,
+            commitment_count, witness_ids[i], witness_id_lens[i],
+            &witness_private_keys[i], &checkpoint->witness_signatures[i]);
+        sm2_pki_epoch_witness_state_cleanup(&witness_state);
+        if (ret != SM2_PKI_SUCCESS)
+        {
+            free(commitments);
+            return 0;
+        }
+    }
+
     free(commitments);
-    if (ret != SM2_PKI_SUCCESS)
+    checkpoint->witness_signature_count = witness_count;
+    return 1;
+}
+
+static int pki_build_forked_checkpoint_with_witnesses(
+    sm2_pki_service_ctx_t *service, const sm2_ec_point_t *ca_public_key,
+    const sm2_pki_epoch_checkpoint_t *base,
+    const uint8_t *const *witness_ids, const size_t *witness_id_lens,
+    const sm2_private_key_t *witness_private_keys, size_t witness_count,
+    sm2_pki_epoch_checkpoint_t *forked)
+{
+    if (!service || !ca_public_key || !base || !forked)
         return 0;
 
-    forked->witness_signature_count = 1;
-    return 1;
+    memset(forked, 0, sizeof(*forked));
+    uint8_t forked_revocation_hash[SM2_REV_MERKLE_HASH_LEN];
+    memcpy(forked_revocation_hash, base->epoch_root_record.revocation_root_hash,
+        sizeof(forked_revocation_hash));
+    forked_revocation_hash[0] ^= 0x5AU;
+
+    pki_merkle_sign_ctx_t sign_ctx = { &service->ca_private_key };
+    if (sm2_pki_epoch_root_sign(base->epoch_root_record.authority_id,
+            base->epoch_root_record.authority_id_len,
+            base->epoch_root_record.epoch_version,
+            base->epoch_root_record.revocation_root_version,
+            forked_revocation_hash,
+            base->epoch_root_record.issuance_root_version,
+            base->epoch_root_record.issuance_root_hash,
+            base->epoch_root_record.witness_policy_version,
+            base->epoch_root_record.witness_policy_hash,
+            base->epoch_root_record.sync_policy_version,
+            base->epoch_root_record.sync_policy_hash,
+            base->epoch_root_record.valid_from,
+            base->epoch_root_record.valid_until, pki_merkle_sign_cb, &sign_ctx,
+            &forked->epoch_root_record)
+        != SM2_IC_SUCCESS)
+    {
+        return 0;
+    }
+
+    return pki_sign_checkpoint_with_witnesses(service, ca_public_key, forked,
+        witness_ids, witness_id_lens, witness_private_keys, witness_count);
 }
 
 static void test_phase146_edge_checkpoint_quorum_product_flow()
@@ -2590,11 +2612,9 @@ static void test_phase146_edge_checkpoint_quorum_product_flow()
     sm2_pki_epoch_checkpoint_t checkpoint_initial;
     sm2_pki_epoch_checkpoint_t checkpoint_updated;
     sm2_pki_epoch_checkpoint_t checkpoint_tampered;
-    sm2_pki_epoch_checkpoint_t checkpoint_forked;
     memset(&checkpoint_initial, 0, sizeof(checkpoint_initial));
     memset(&checkpoint_updated, 0, sizeof(checkpoint_updated));
     memset(&checkpoint_tampered, 0, sizeof(checkpoint_tampered));
-    memset(&checkpoint_forked, 0, sizeof(checkpoint_forked));
     TEST_ASSERT(pki_build_default_epoch_checkpoint(edge, &checkpoint_initial),
         "Build Initial Checkpoint");
 
@@ -2609,46 +2629,44 @@ static void test_phase146_edge_checkpoint_quorum_product_flow()
 
     checkpoint_tampered = checkpoint_updated;
     checkpoint_tampered.witness_signatures[0].signature[0] ^= 0x01U;
-    TEST_ASSERT(pki_build_forked_revocation_checkpoint(
-                    service, &ca_pub, &checkpoint_updated, &checkpoint_forked),
-        "Build Forked Checkpoint");
 
-    static const uint8_t edge_a[] = "edge-a";
-    static const uint8_t edge_b[] = "edge-b";
-    static const uint8_t edge_c[] = "edge-c";
+    static const uint8_t spoofed_edge[] = "edge-spoofed";
+    const uint8_t *default_edge_id = g_pki_default_witness.witness_id;
+    size_t default_edge_id_len = g_pki_default_witness.witness_id_len;
     sm2_pki_edge_checkpoint_result_t edge_result;
     sm2_pki_edge_checkpoint_sample_t samples_bad[]
-        = { { edge_a, sizeof(edge_a) - 1, &checkpoint_updated },
-              { edge_b, sizeof(edge_b) - 1, &checkpoint_tampered } };
+        = { { default_edge_id, default_edge_id_len, &checkpoint_tampered },
+              { spoofed_edge, sizeof(spoofed_edge) - 1,
+                  &checkpoint_updated } };
     memset(&edge_result, 0, sizeof(edge_result));
     TEST_ASSERT(sm2_pki_client_import_edge_checkpoint_quorum(
-                    verifier, samples_bad, 2, 2, auth_now, &edge_result)
+                    verifier, samples_bad, 2, 1, auth_now, &edge_result)
             == SM2_PKI_ERR_VERIFY,
         "Reject Malicious Edge Without Quorum");
     TEST_ASSERT(edge_result.decision
             == SM2_PKI_EDGE_CHECKPOINT_DECISION_INSUFFICIENT_QUORUM,
         "Malicious Sample Insufficient Decision");
-    TEST_ASSERT(edge_result.valid_sample_count == 1
-            && edge_result.invalid_sample_count == 1,
+    TEST_ASSERT(edge_result.valid_sample_count == 0
+            && edge_result.invalid_sample_count == 2,
         "Malicious Sample Counted");
 
     sm2_pki_edge_checkpoint_sample_t samples_accept[]
-        = { { edge_a, sizeof(edge_a) - 1, &checkpoint_updated },
-              { edge_b, sizeof(edge_b) - 1, &checkpoint_updated },
-              { edge_c, sizeof(edge_c) - 1, &checkpoint_tampered } };
+        = { { default_edge_id, default_edge_id_len, &checkpoint_updated },
+              { spoofed_edge, sizeof(spoofed_edge) - 1, &checkpoint_updated },
+              { default_edge_id, default_edge_id_len, &checkpoint_tampered } };
     memset(&edge_result, 0, sizeof(edge_result));
     TEST_ASSERT(sm2_pki_client_import_edge_checkpoint_quorum(
-                    verifier, samples_accept, 3, 2, auth_now, &edge_result)
+                    verifier, samples_accept, 3, 1, auth_now, &edge_result)
             == SM2_PKI_SUCCESS,
         "Accept Edge Quorum");
     TEST_ASSERT(
         edge_result.decision == SM2_PKI_EDGE_CHECKPOINT_DECISION_ACCEPTED,
         "Accepted Decision");
     TEST_ASSERT(edge_result.quorum.quorum_met
-            && edge_result.quorum.valid_vote_count == 2,
+            && edge_result.quorum.valid_vote_count == 1,
         "Accepted Quorum Counts");
-    TEST_ASSERT(edge_result.valid_sample_count == 2
-            && edge_result.invalid_sample_count == 1,
+    TEST_ASSERT(edge_result.valid_sample_count == 1
+            && edge_result.invalid_sample_count == 2,
         "Accepted Sample Counts");
 
     sm2_pki_epoch_checkpoint_t exported_checkpoint;
@@ -2664,11 +2682,10 @@ static void test_phase146_edge_checkpoint_quorum_product_flow()
         "Verifier Cached Updated Epoch");
 
     sm2_pki_edge_checkpoint_sample_t samples_stale[]
-        = { { edge_a, sizeof(edge_a) - 1, &checkpoint_initial },
-              { edge_b, sizeof(edge_b) - 1, &checkpoint_initial } };
+        = { { default_edge_id, default_edge_id_len, &checkpoint_initial } };
     memset(&edge_result, 0, sizeof(edge_result));
     TEST_ASSERT(sm2_pki_client_import_edge_checkpoint_quorum(
-                    verifier, samples_stale, 2, 2, auth_now, &edge_result)
+                    verifier, samples_stale, 1, 1, auth_now, &edge_result)
             == SM2_PKI_ERR_VERIFY,
         "Reject Delayed Edge Quorum");
     TEST_ASSERT(edge_result.decision == SM2_PKI_EDGE_CHECKPOINT_DECISION_STALE,
@@ -2678,9 +2695,80 @@ static void test_phase146_edge_checkpoint_quorum_product_flow()
                 == checkpoint_updated.epoch_root_record.epoch_version,
         "Delayed Quorum Compared To Local Highwater");
 
+    sm2_private_key_t edge_witness_priv[2];
+    sm2_ec_point_t edge_witness_pub[2];
+    sm2_pki_transparency_witness_t edge_witnesses[2];
+    memset(edge_witness_priv, 0, sizeof(edge_witness_priv));
+    memset(edge_witness_pub, 0, sizeof(edge_witness_pub));
+    memset(edge_witnesses, 0, sizeof(edge_witnesses));
+    const uint8_t edge_wid0[] = "edge-witness-0";
+    const uint8_t edge_wid1[] = "edge-witness-1";
+    const uint8_t *edge_wids[] = { edge_wid0, edge_wid1 };
+    const size_t edge_wid_lens[]
+        = { sizeof(edge_wid0) - 1, sizeof(edge_wid1) - 1 };
+    for (size_t i = 0; i < 2; i++)
+    {
+        TEST_ASSERT(test_generate_sm2_keypair(
+                        &edge_witness_priv[i], &edge_witness_pub[i]),
+            "Generate Edge Witness Key");
+        memcpy(edge_witnesses[i].witness_id, edge_wids[i], edge_wid_lens[i]);
+        edge_witnesses[i].witness_id_len = edge_wid_lens[i];
+        edge_witnesses[i].key_version = SM2_PKI_WITNESS_KEY_DEFAULT_VERSION;
+        edge_witnesses[i].valid_from = 0;
+        edge_witnesses[i].valid_until = SM2_PKI_WITNESS_KEY_VALID_UNTIL_OPEN;
+        edge_witnesses[i].public_key = edge_witness_pub[i];
+    }
+
+    sm2_pki_transparency_policy_t edge_threshold_policy
+        = { edge_witnesses, 2, 2 };
+    TEST_ASSERT(sm2_pki_client_set_transparency_policy(
+                    edge, &edge_threshold_policy)
+            == SM2_PKI_SUCCESS,
+        "Set Edge Threshold Policy");
+    TEST_ASSERT(sm2_pki_client_set_transparency_policy(
+                    verifier, &edge_threshold_policy)
+            == SM2_PKI_SUCCESS,
+        "Set Verifier Threshold Policy");
+    TEST_ASSERT(pki_bind_service_epoch_policy(service, &edge_threshold_policy),
+        "Bind Edge Threshold Policy");
+
+    sm2_pki_epoch_checkpoint_t checkpoint_threshold;
+    sm2_pki_epoch_checkpoint_t checkpoint_threshold_forked;
+    memset(&checkpoint_threshold, 0, sizeof(checkpoint_threshold));
+    memset(&checkpoint_threshold_forked, 0, sizeof(checkpoint_threshold_forked));
+    TEST_ASSERT(sm2_pki_service_get_epoch_root_record(
+                    service, &checkpoint_threshold.epoch_root_record)
+            == SM2_PKI_SUCCESS,
+        "Read Edge Threshold Root");
+    TEST_ASSERT(pki_sign_checkpoint_with_witnesses(service, &ca_pub,
+                    &checkpoint_threshold, edge_wids, edge_wid_lens,
+                    edge_witness_priv, 2),
+        "Sign Edge Threshold Checkpoint");
+
+    sm2_pki_edge_checkpoint_sample_t samples_threshold[]
+        = { { edge_wid0, sizeof(edge_wid0) - 1, &checkpoint_threshold },
+              { edge_wid1, sizeof(edge_wid1) - 1, &checkpoint_threshold },
+              { spoofed_edge, sizeof(spoofed_edge) - 1,
+                  &checkpoint_threshold } };
+    memset(&edge_result, 0, sizeof(edge_result));
+    TEST_ASSERT(sm2_pki_client_import_edge_checkpoint_quorum(verifier,
+                    samples_threshold, 3, 2, auth_now, &edge_result)
+            == SM2_PKI_SUCCESS,
+        "Accept Witness-Bound Edge Quorum");
+    TEST_ASSERT(edge_result.quorum.quorum_met
+            && edge_result.quorum.valid_vote_count == 2,
+        "Witness-Bound Quorum Counts");
+    TEST_ASSERT(edge_result.invalid_sample_count == 1,
+        "Spoofed Edge Node Rejected");
+
+    TEST_ASSERT(pki_build_forked_checkpoint_with_witnesses(service, &ca_pub,
+                    &checkpoint_threshold, edge_wids, edge_wid_lens,
+                    edge_witness_priv, 2, &checkpoint_threshold_forked),
+        "Build Threshold Forked Checkpoint");
     sm2_pki_edge_checkpoint_sample_t samples_fork[]
-        = { { edge_a, sizeof(edge_a) - 1, &checkpoint_updated },
-              { edge_b, sizeof(edge_b) - 1, &checkpoint_forked } };
+        = { { edge_wid0, sizeof(edge_wid0) - 1, &checkpoint_threshold },
+              { edge_wid1, sizeof(edge_wid1) - 1,
+                  &checkpoint_threshold_forked } };
     memset(&edge_result, 0, sizeof(edge_result));
     TEST_ASSERT(sm2_pki_client_import_edge_checkpoint_quorum(
                     verifier, samples_fork, 2, 2, auth_now, &edge_result)

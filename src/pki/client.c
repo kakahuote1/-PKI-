@@ -2719,6 +2719,38 @@ static bool pki_client_edge_node_id_valid(
         && node_id_len <= SM2_REV_SYNC_NODE_ID_MAX_LEN;
 }
 
+static bool pki_client_edge_sample_bound_to_witness(
+    const sm2_pki_edge_checkpoint_sample_t *sample)
+{
+    if (!sample || !sample->checkpoint
+        || !pki_client_edge_node_id_valid(sample->node_id, sample->node_id_len))
+    {
+        return false;
+    }
+
+    const sm2_pki_epoch_checkpoint_t *checkpoint = sample->checkpoint;
+    if (checkpoint->witness_signature_count == 0
+        || checkpoint->witness_signature_count
+            > SM2_PKI_TRANSPARENCY_MAX_WITNESSES)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < checkpoint->witness_signature_count; i++)
+    {
+        const sm2_pki_transparency_witness_signature_t *signature
+            = &checkpoint->witness_signatures[i];
+        if (signature->witness_id_len == sample->node_id_len
+            && memcmp(
+                   signature->witness_id, sample->node_id, sample->node_id_len)
+                == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void pki_client_edge_result_note_local(
     sm2_pki_edge_checkpoint_result_t *result,
     const sm2_pki_epoch_cache_entry_t *entry)
@@ -2892,6 +2924,11 @@ sm2_pki_error_t sm2_pki_client_import_edge_checkpoint_quorum(
         sm2_pki_error_t ret = pki_client_validate_epoch_checkpoint(
             state, sample->checkpoint, now_ts, &matched_ca_index);
         if (ret != SM2_PKI_SUCCESS)
+        {
+            result->invalid_sample_count++;
+            continue;
+        }
+        if (!pki_client_edge_sample_bound_to_witness(sample))
         {
             result->invalid_sample_count++;
             continue;

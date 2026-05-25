@@ -63,6 +63,7 @@ extern "C"
 
     typedef struct
     {
+        /* node_id must match a witness_id in checkpoint->witness_signatures. */
         const uint8_t *node_id;
         size_t node_id_len;
         const sm2_pki_epoch_checkpoint_t *checkpoint;

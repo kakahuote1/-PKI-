@@ -14,6 +14,8 @@
 #include <openssl/ec.h>
 #include <openssl/obj_mac.h>
 
+#define SM2_PKI_CERT_ISSUE_SERIAL_RETRY_MAX 16U
+
 static void service_u64_to_be(uint64_t v, uint8_t out[8])
 {
     for (int i = 7; i >= 0; i--)
@@ -1496,11 +1498,26 @@ sm2_pki_error_t sm2_pki_cert_issue(sm2_pki_service_ctx_t *ctx,
     if (alloc_ret != SM2_PKI_SUCCESS)
         return alloc_ret;
 
-    sm2_ic_error_t ret = sm2_ic_ca_generate_cert(result, request,
-        state->issuer_id, state->issuer_id_len, &state->ca_private_key,
-        &state->ca_public_key, now_ts);
-    if (ret != SM2_IC_SUCCESS)
-        return sm2_pki_error_from_ic(ret);
+    sm2_ic_error_t ret = SM2_IC_ERR_CRYPTO;
+    for (size_t attempt = 0; attempt < SM2_PKI_CERT_ISSUE_SERIAL_RETRY_MAX;
+         attempt++)
+    {
+        memset(result, 0, sizeof(*result));
+        ret = sm2_ic_ca_generate_cert(result, request, state->issuer_id,
+            state->issuer_id_len, &state->ca_private_key, &state->ca_public_key,
+            now_ts);
+        if (ret != SM2_IC_SUCCESS)
+            return sm2_pki_error_from_ic(ret);
+
+        if (!service_find_by_serial(ctx, result->cert.serial_number))
+            break;
+
+        if (attempt + 1U == SM2_PKI_CERT_ISSUE_SERIAL_RETRY_MAX)
+        {
+            memset(result, 0, sizeof(*result));
+            return SM2_PKI_ERR_CONFLICT;
+        }
+    }
 
     uint8_t issuance_commitment[SM2_PKI_ISSUANCE_COMMITMENT_LEN];
     ret = sm2_pki_issuance_cert_commitment(&result->cert, issuance_commitment);
