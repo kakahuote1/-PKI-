@@ -3021,6 +3021,145 @@ static void test_phase148_authority_profile_witness_policy_scope()
     TEST_PASS();
 }
 
+static void test_phase148_authority_profile_custom_sync_policy()
+{
+    sm2_pki_service_ctx_t *service = NULL;
+    const uint8_t issuer[] = "P148_SYNC_CA";
+    const uint8_t signer_id[] = "P148_SYNC_SIGNER";
+    uint64_t base_now = test_now_unix();
+    TEST_ASSERT(sm2_pki_service_create(
+                    &service, issuer, sizeof(issuer) - 1, 16, 300, base_now)
+            == SM2_PKI_SUCCESS,
+        "Service Init");
+    TEST_ASSERT(sm2_pki_identity_register(service, signer_id,
+                    sizeof(signer_id) - 1, SM2_KU_DIGITAL_SIGNATURE)
+            == SM2_PKI_SUCCESS,
+        "Signer Register");
+
+    sm2_ic_cert_result_t cert;
+    sm2_private_key_t temp;
+    memset(&cert, 0, sizeof(cert));
+    memset(&temp, 0, sizeof(temp));
+    TEST_ASSERT(
+        pki_issue_identity_cert(service, signer_id, sizeof(signer_id) - 1,
+            SM2_KU_DIGITAL_SIGNATURE, &cert, &temp),
+        "Issue Signer");
+
+    sm2_ec_point_t ca_pub;
+    memset(&ca_pub, 0, sizeof(ca_pub));
+    TEST_ASSERT(
+        sm2_pki_service_get_ca_public_key(service, &ca_pub) == SM2_PKI_SUCCESS,
+        "CA Public Key");
+
+    sm2_pki_client_ctx_t *signer = NULL;
+    sm2_pki_client_ctx_t *verifier_default_sync = NULL;
+    sm2_pki_client_ctx_t *verifier_custom_sync = NULL;
+    TEST_ASSERT(
+        sm2_pki_client_create(&signer, &ca_pub, service) == SM2_PKI_SUCCESS,
+        "Signer Init");
+    TEST_ASSERT(sm2_pki_client_import_cert(signer, &cert, &temp, &ca_pub)
+            == SM2_PKI_SUCCESS,
+        "Signer Import");
+    TEST_ASSERT(sm2_pki_client_create(&verifier_default_sync, &ca_pub, NULL)
+            == SM2_PKI_SUCCESS,
+        "Default Sync Verifier Init");
+    TEST_ASSERT(sm2_pki_client_create(&verifier_custom_sync, &ca_pub, NULL)
+            == SM2_PKI_SUCCESS,
+        "Custom Sync Verifier Init");
+
+    TEST_ASSERT(pki_default_transparency_policy_init(), "Default Policy Init");
+    TEST_ASSERT(pki_bind_service_epoch_policy(
+                    service, &g_pki_default_transparency_policy),
+        "Bind Default Policy");
+
+    sm2_pki_broadcast_policy_t custom_policy;
+    TEST_ASSERT(sm2_pki_service_get_broadcast_policy(service, &custom_policy)
+            == SM2_PKI_SUCCESS,
+        "Read Broadcast Policy");
+    custom_policy.t_base_sec = 90U;
+    custom_policy.max_backoff_sec = 360U;
+    custom_policy.full_checkpoint_interval_sec = 7200U;
+    uint8_t custom_sync_digest[SM2_PKI_POLICY_DIGEST_LEN];
+    TEST_ASSERT(sm2_pki_broadcast_policy_sync_digest(
+                    &custom_policy, custom_sync_digest)
+            == SM2_IC_SUCCESS,
+        "Custom Sync Digest");
+
+    uint64_t auth_now = test_cert_now(&cert.cert);
+    TEST_ASSERT(sm2_pki_service_set_broadcast_policy(
+                    service, &custom_policy, auth_now)
+            == SM2_PKI_SUCCESS,
+        "Set Custom Broadcast Policy");
+
+    sm2_pki_epoch_checkpoint_t checkpoint;
+    memset(&checkpoint, 0, sizeof(checkpoint));
+    TEST_ASSERT(
+        pki_build_current_epoch_checkpoint(signer, &checkpoint), "Checkpoint");
+
+    TEST_ASSERT(pki_add_authority_profile_with_policy(verifier_default_sync,
+                    issuer, sizeof(issuer) - 1, &ca_pub, false,
+                    &g_pki_default_transparency_policy),
+        "Default Sync Authority Policy");
+    TEST_ASSERT(sm2_pki_client_import_epoch_checkpoint(
+                    verifier_default_sync, &checkpoint, auth_now)
+            == SM2_PKI_ERR_VERIFY,
+        "Default Sync Policy Rejects Custom Checkpoint");
+    sm2_pki_diagnostic_t diag;
+    memset(&diag, 0, sizeof(diag));
+    TEST_ASSERT(sm2_pki_client_get_last_diagnostic(
+                    verifier_default_sync, &diag)
+            == SM2_PKI_SUCCESS,
+        "Read Sync Policy Diagnostic");
+    TEST_ASSERT(diag.reason == SM2_PKI_DIAG_SYNC_POLICY_MISMATCH,
+        "Sync Policy Diagnostic Reason");
+
+    TEST_ASSERT(pki_add_authority_profile_with_policy_and_sync(
+                    verifier_custom_sync, issuer, sizeof(issuer) - 1, &ca_pub,
+                    false, &g_pki_default_transparency_policy,
+                    SM2_PKI_DEFAULT_SYNC_POLICY_VERSION, custom_sync_digest),
+        "Custom Sync Authority Policy");
+    TEST_ASSERT(sm2_pki_client_import_epoch_checkpoint(
+                    verifier_custom_sync, &checkpoint, auth_now)
+            == SM2_PKI_SUCCESS,
+        "Custom Sync Policy Accepts Checkpoint");
+
+    const uint8_t msg[] = "P148_CUSTOM_SYNC";
+    sm2_auth_signature_t sig;
+    sm2_pki_evidence_bundle_t bundle;
+    sm2_pki_verify_request_t request;
+    const sm2_implicit_cert_t *request_cert = NULL;
+    const sm2_ec_point_t *request_public_key = NULL;
+    memset(&sig, 0, sizeof(sig));
+    memset(&bundle, 0, sizeof(bundle));
+    memset(&request, 0, sizeof(request));
+    TEST_ASSERT(
+        sm2_pki_sign(signer, msg, sizeof(msg) - 1, &sig) == SM2_PKI_SUCCESS,
+        "Sign Request");
+    TEST_ASSERT(pki_client_get_identity_material(
+                    signer, &request_cert, &request_public_key),
+        "Get Identity Material");
+    TEST_ASSERT(sm2_pki_client_export_epoch_evidence(signer, auth_now, &bundle)
+            == SM2_PKI_SUCCESS,
+        "Export Custom Sync Evidence");
+    request.cert = request_cert;
+    request.public_key = request_public_key;
+    request.message = msg;
+    request.message_len = sizeof(msg) - 1;
+    request.signature = &sig;
+    request.evidence_bundle = &bundle;
+    size_t matched = 0;
+    TEST_ASSERT(sm2_pki_verify(verifier_custom_sync, &request, auth_now,
+                    &matched)
+            == SM2_PKI_SUCCESS,
+        "Custom Sync Policy Verifies Evidence");
+
+    sm2_pki_client_destroy(&verifier_custom_sync);
+    sm2_pki_client_destroy(&verifier_default_sync);
+    sm2_pki_client_destroy(&signer);
+    sm2_pki_service_destroy(&service);
+    TEST_PASS();
+}
+
 static void test_phase143_epoch_bundle_binds_roots_and_witnesses()
 {
     sm2_pki_service_ctx_t *service = NULL;

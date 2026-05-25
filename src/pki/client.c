@@ -312,6 +312,30 @@ pki_client_witness_policy_for_authority(const sm2_pki_client_state_t *state,
     return NULL;
 }
 
+static bool pki_client_sync_policy_for_authority(
+    const sm2_pki_client_state_t *state, const uint8_t *authority_id,
+    size_t authority_id_len, uint64_t *sync_policy_version,
+    uint8_t sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN])
+{
+    if (!sync_policy_version || !sync_policy_hash)
+        return false;
+
+    const sm2_pki_authority_profile_entry_t *profile
+        = pki_client_find_authority_profile_const(
+            state, authority_id, authority_id_len);
+    if (profile && profile->has_sync_policy)
+    {
+        *sync_policy_version = profile->sync_policy_version;
+        memcpy(sync_policy_hash, profile->sync_policy_hash,
+            SM2_PKI_POLICY_DIGEST_LEN);
+        return true;
+    }
+
+    *sync_policy_version = SM2_PKI_DEFAULT_SYNC_POLICY_VERSION;
+    return sm2_pki_default_sync_policy_digest(sync_policy_hash)
+        == SM2_IC_SUCCESS;
+}
+
 static sm2_pki_error_t pki_client_check_epoch_root_freshness(
     const sm2_pki_epoch_cache_entry_t *entry,
     const sm2_pki_epoch_root_record_t *root_record,
@@ -2081,39 +2105,59 @@ static sm2_pki_error_t pki_client_check_epoch_policy_binding(
 {
     if (!state || !root_record || !policy)
         return SM2_PKI_ERR_VERIFY;
-    if (root_record->witness_policy_version
-            != SM2_PKI_DEFAULT_WITNESS_POLICY_VERSION
-        || root_record->sync_policy_version
-            != SM2_PKI_DEFAULT_SYNC_POLICY_VERSION)
+    uint64_t expected_sync_policy_version = 0;
+    uint8_t expected_sync_hash[SM2_PKI_POLICY_DIGEST_LEN];
+    if (!pki_client_sync_policy_for_authority(state, root_record->authority_id,
+            root_record->authority_id_len, &expected_sync_policy_version,
+            expected_sync_hash))
     {
+        pki_client_diag_set_authority(state, SM2_PKI_DIAG_SYNC_POLICY_MISMATCH,
+            root_record->authority_id, root_record->authority_id_len);
+        return SM2_PKI_ERR_VERIFY;
+    }
+
+    if (root_record->witness_policy_version
+        != SM2_PKI_DEFAULT_WITNESS_POLICY_VERSION)
+    {
+        sm2_secure_memzero(expected_sync_hash, sizeof(expected_sync_hash));
         pki_client_diag_set_authority(state,
             SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH, root_record->authority_id,
             root_record->authority_id_len);
         return SM2_PKI_ERR_VERIFY;
     }
+    if (root_record->sync_policy_version != expected_sync_policy_version)
+    {
+        sm2_secure_memzero(expected_sync_hash, sizeof(expected_sync_hash));
+        pki_client_diag_set_authority(state, SM2_PKI_DIAG_SYNC_POLICY_MISMATCH,
+            root_record->authority_id, root_record->authority_id_len);
+        return SM2_PKI_ERR_VERIFY;
+    }
 
     uint8_t witness_digest[SM2_PKI_POLICY_DIGEST_LEN];
-    uint8_t sync_digest[SM2_PKI_POLICY_DIGEST_LEN];
     sm2_ic_error_t ic_ret
         = sm2_pki_transparency_policy_digest(policy, witness_digest);
     if (ic_ret != SM2_IC_SUCCESS)
+    {
+        sm2_secure_memzero(expected_sync_hash, sizeof(expected_sync_hash));
         return sm2_pki_error_from_ic(ic_ret);
-    ic_ret = sm2_pki_default_sync_policy_digest(sync_digest);
-    if (ic_ret != SM2_IC_SUCCESS)
-        return sm2_pki_error_from_ic(ic_ret);
+    }
 
-    bool ok = pki_client_bytes_equal_ct(root_record->witness_policy_hash,
-                  witness_digest, sizeof(witness_digest))
-        && pki_client_bytes_equal_ct(
-            root_record->sync_policy_hash, sync_digest, sizeof(sync_digest));
-    sm2_secure_memzero(witness_digest, sizeof(witness_digest));
-    sm2_secure_memzero(sync_digest, sizeof(sync_digest));
+    bool witness_ok
+        = pki_client_bytes_equal_ct(root_record->witness_policy_hash,
+            witness_digest, sizeof(witness_digest));
+    bool sync_ok = pki_client_bytes_equal_ct(root_record->sync_policy_hash,
+        expected_sync_hash, sizeof(expected_sync_hash));
+    bool ok = witness_ok && sync_ok;
     if (!ok)
     {
-        pki_client_diag_set_authority(state,
-            SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH, root_record->authority_id,
+        sm2_pki_diagnostic_reason_t reason = witness_ok
+            ? SM2_PKI_DIAG_SYNC_POLICY_MISMATCH
+            : SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH;
+        pki_client_diag_set_authority(state, reason, root_record->authority_id,
             root_record->authority_id_len);
     }
+    sm2_secure_memzero(witness_digest, sizeof(witness_digest));
+    sm2_secure_memzero(expected_sync_hash, sizeof(expected_sync_hash));
     return ok ? SM2_PKI_SUCCESS : SM2_PKI_ERR_VERIFY;
 }
 static sm2_pki_error_t pki_client_verify_witness_signature_set(
@@ -2541,6 +2585,28 @@ static sm2_pki_error_t pki_client_authority_profile_store_witness_policy(
     return SM2_PKI_SUCCESS;
 }
 
+static sm2_pki_error_t pki_client_authority_profile_store_sync_policy(
+    sm2_pki_authority_profile_entry_t *entry,
+    const sm2_pki_authority_profile_t *profile)
+{
+    if (!entry || !profile)
+        return SM2_PKI_ERR_PARAM;
+
+    entry->has_sync_policy = false;
+    entry->sync_policy_version = 0;
+    memset(entry->sync_policy_hash, 0, sizeof(entry->sync_policy_hash));
+    if (!profile->has_sync_policy)
+        return SM2_PKI_SUCCESS;
+    if (profile->sync_policy_version == 0)
+        return SM2_PKI_ERR_PARAM;
+
+    entry->has_sync_policy = true;
+    entry->sync_policy_version = profile->sync_policy_version;
+    memcpy(entry->sync_policy_hash, profile->sync_policy_hash,
+        sizeof(entry->sync_policy_hash));
+    return SM2_PKI_SUCCESS;
+}
+
 sm2_pki_error_t sm2_pki_client_add_authority_profile(
     sm2_pki_client_ctx_t *ctx, const sm2_pki_authority_profile_t *profile)
 {
@@ -2566,6 +2632,12 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
                 profile->authority_id_len);
             return ret;
         }
+    }
+    if (profile->has_sync_policy && profile->sync_policy_version == 0)
+    {
+        pki_client_diag_set_authority(state, SM2_PKI_DIAG_SYNC_POLICY_MISMATCH,
+            profile->authority_id, profile->authority_id_len);
+        return SM2_PKI_ERR_PARAM;
     }
 
     size_t ca_index = 0;
@@ -2598,6 +2670,9 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
                 profile->has_witness_policy ? &profile->witness_policy : NULL);
         if (ret != SM2_PKI_SUCCESS)
             return ret;
+        ret = pki_client_authority_profile_store_sync_policy(entry, profile);
+        if (ret != SM2_PKI_SUCCESS)
+            return ret;
         pki_client_epoch_cache_drop_authority_checkpoint(
             state, profile->authority_id, profile->authority_id_len);
         pki_client_cache_reset_authority(
@@ -2619,6 +2694,12 @@ sm2_pki_error_t sm2_pki_client_add_authority_profile(
         sm2_pki_error_t ret
             = pki_client_authority_profile_store_witness_policy(entry,
                 profile->has_witness_policy ? &profile->witness_policy : NULL);
+        if (ret != SM2_PKI_SUCCESS)
+        {
+            memset(entry, 0, sizeof(*entry));
+            return ret;
+        }
+        ret = pki_client_authority_profile_store_sync_policy(entry, profile);
         if (ret != SM2_PKI_SUCCESS)
         {
             memset(entry, 0, sizeof(*entry));

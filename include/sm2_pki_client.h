@@ -101,7 +101,8 @@ extern "C"
         SM2_PKI_DIAG_ROOT_FORK = 8,
         SM2_PKI_DIAG_WITNESS_POLICY_MISMATCH = 9,
         SM2_PKI_DIAG_WITNESS_THRESHOLD_MISSING = 10,
-        SM2_PKI_DIAG_EVIDENCE_BINDING_MISMATCH = 11
+        SM2_PKI_DIAG_EVIDENCE_BINDING_MISMATCH = 11,
+        SM2_PKI_DIAG_SYNC_POLICY_MISMATCH = 12
     } sm2_pki_diagnostic_reason_t;
 
     typedef struct
@@ -125,6 +126,9 @@ extern "C"
         bool cache_checkpoint;
         bool has_witness_policy;
         sm2_pki_transparency_policy_t witness_policy;
+        bool has_sync_policy;
+        uint64_t sync_policy_version;
+        uint8_t sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN];
     } sm2_pki_authority_profile_t;
 
 #define SM2_PKI_CLIENT_PERSISTED_STATE_VERSION 1U
