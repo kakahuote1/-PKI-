@@ -407,15 +407,23 @@ static void test_phase4_pki_controls_and_param_defense()
             == SM2_PKI_ERR_PARAM,
         "Key Agreement NULL Ephemeral");
 
-    uint8_t aead_iv[12] = { 0 };
+    sm2_pki_secure_session_t aead_session;
+    memset(&aead_session, 0, sizeof(aead_session));
+    TEST_ASSERT(sm2_pki_secure_session_init(&aead_session,
+                    SM2_AUTH_AEAD_MODE_SM4_GCM, session_key,
+                    sizeof(session_key), SM2_PKI_SESSION_ROLE_INITIATOR)
+            == SM2_PKI_SUCCESS,
+        "Secure Session Init");
+    uint64_t aead_sequence = 0;
     uint8_t tag[SM2_AUTH_AEAD_TAG_MAX_LEN] = { 0 };
     size_t ciphertext_len = 0;
     size_t tag_len = 16;
-    TEST_ASSERT(sm2_pki_encrypt(SM2_AUTH_AEAD_MODE_SM4_GCM, session_key,
-                    aead_iv, sizeof(aead_iv), NULL, 0, msg, sizeof(msg) - 1,
-                    NULL, &ciphertext_len, tag, &tag_len)
+    TEST_ASSERT(sm2_pki_secure_session_encrypt(&aead_session, NULL, 0, msg,
+                    sizeof(msg) - 1, &aead_sequence, NULL, &ciphertext_len, tag,
+                    &tag_len)
             == SM2_PKI_ERR_PARAM,
         "Encrypt NULL Ciphertext");
+    sm2_pki_secure_session_cleanup(&aead_session);
     TEST_ASSERT(sm2_pki_service_refresh_root(NULL, 0) == SM2_PKI_ERR_PARAM,
         "Refresh Root NULL Service");
 
