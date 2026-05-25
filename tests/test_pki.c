@@ -220,10 +220,28 @@ static int pki_configure_default_transparency_policy(
         == SM2_PKI_SUCCESS;
 }
 
+static int pki_add_authority_profile_with_policy_and_sync(
+    sm2_pki_client_ctx_t *client, const uint8_t *authority_id,
+    size_t authority_id_len, const sm2_ec_point_t *ca_public_key,
+    bool cache_checkpoint, const sm2_pki_transparency_policy_t *policy,
+    uint64_t sync_policy_version,
+    const uint8_t sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN]);
+
 static int pki_add_authority_profile_with_policy(sm2_pki_client_ctx_t *client,
     const uint8_t *authority_id, size_t authority_id_len,
     const sm2_ec_point_t *ca_public_key, bool cache_checkpoint,
     const sm2_pki_transparency_policy_t *policy)
+{
+    return pki_add_authority_profile_with_policy_and_sync(client, authority_id,
+        authority_id_len, ca_public_key, cache_checkpoint, policy, 0, NULL);
+}
+
+static int pki_add_authority_profile_with_policy_and_sync(
+    sm2_pki_client_ctx_t *client, const uint8_t *authority_id,
+    size_t authority_id_len, const sm2_ec_point_t *ca_public_key,
+    bool cache_checkpoint, const sm2_pki_transparency_policy_t *policy,
+    uint64_t sync_policy_version,
+    const uint8_t sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN])
 {
     if (!client || !authority_id || authority_id_len == 0 || !ca_public_key
         || authority_id_len > SM2_REV_ROOT_AUTHORITY_ID_MAX_LEN)
@@ -241,6 +259,13 @@ static int pki_add_authority_profile_with_policy(sm2_pki_client_ctx_t *client,
     {
         profile.has_witness_policy = true;
         profile.witness_policy = *policy;
+    }
+    if (sync_policy_version != 0 && sync_policy_hash)
+    {
+        profile.has_sync_policy = true;
+        profile.sync_policy_version = sync_policy_version;
+        memcpy(profile.sync_policy_hash, sync_policy_hash,
+            SM2_PKI_POLICY_DIGEST_LEN);
     }
     return sm2_pki_client_add_authority_profile(client, &profile)
         == SM2_PKI_SUCCESS;
@@ -282,7 +307,7 @@ static int pki_bind_service_epoch_policy(
         == SM2_PKI_SUCCESS;
 }
 
-static int pki_build_default_epoch_checkpoint(
+static int pki_build_current_epoch_checkpoint(
     sm2_pki_client_ctx_t *signer, sm2_pki_epoch_checkpoint_t *checkpoint)
 {
     sm2_pki_client_state_t *state = signer;
@@ -291,12 +316,6 @@ static int pki_build_default_epoch_checkpoint(
         return 0;
     sm2_pki_service_ctx_t *service = state->revocation_service;
     const sm2_ec_point_t *ca_public_key = &state->trust_store.ca_pub_keys[0];
-
-    if (!pki_bind_service_epoch_policy(
-            service, &g_pki_default_transparency_policy))
-    {
-        return 0;
-    }
 
     memset(checkpoint, 0, sizeof(*checkpoint));
     if (sm2_pki_service_get_epoch_root_record(
@@ -352,6 +371,23 @@ static int pki_build_default_epoch_checkpoint(
     }
     checkpoint->witness_signature_count = 1;
     return 1;
+}
+
+static int pki_build_default_epoch_checkpoint(
+    sm2_pki_client_ctx_t *signer, sm2_pki_epoch_checkpoint_t *checkpoint)
+{
+    sm2_pki_client_state_t *state = signer;
+    if (!state || !state->revocation_service
+        || !pki_default_transparency_policy_init())
+    {
+        return 0;
+    }
+    if (!pki_bind_service_epoch_policy(
+            state->revocation_service, &g_pki_default_transparency_policy))
+    {
+        return 0;
+    }
+    return pki_build_current_epoch_checkpoint(signer, checkpoint);
 }
 
 static int pki_import_epoch_checkpoint_from_signer(sm2_pki_client_ctx_t *client,
@@ -469,6 +505,7 @@ void run_test_pki_suite(void)
     RUN_TEST(test_phase146_edge_checkpoint_quorum_product_flow);
     RUN_TEST(test_phase147_authority_profile_lightweight_checkpoint_cache);
     RUN_TEST(test_phase148_authority_profile_witness_policy_scope);
+    RUN_TEST(test_phase148_authority_profile_custom_sync_policy);
     RUN_TEST(test_phase143_epoch_bundle_binds_roots_and_witnesses);
     RUN_TEST(test_phase144_evidence_bundle_standard_wire_sections);
     RUN_TEST(test_phase139_root_versions_are_scoped_per_authority);

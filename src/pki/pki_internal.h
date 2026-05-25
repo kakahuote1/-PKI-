@@ -185,6 +185,9 @@ typedef struct
     sm2_pki_transparency_witness_t
         witnesses[SM2_PKI_TRANSPARENCY_MAX_WITNESSES];
     sm2_pki_transparency_policy_t witness_policy;
+    bool has_sync_policy;
+    uint64_t sync_policy_version;
+    uint8_t sync_policy_hash[SM2_PKI_POLICY_DIGEST_LEN];
 } sm2_pki_authority_profile_entry_t;
 
 struct sm2_pki_service_ctx_st
