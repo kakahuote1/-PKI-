@@ -196,6 +196,22 @@ extern "C"
         const sm2_pki_evidence_bundle_t *evidence_bundle;
     } sm2_pki_verify_request_t;
 
+    typedef enum
+    {
+        SM2_PKI_SESSION_ROLE_INITIATOR = 1,
+        SM2_PKI_SESSION_ROLE_RESPONDER = 2
+    } sm2_pki_session_role_t;
+
+    typedef struct
+    {
+        bool initialized;
+        sm2_pki_aead_mode_t mode;
+        sm2_pki_session_role_t role;
+        uint64_t send_sequence;
+        uint64_t receive_sequence;
+        uint8_t key[16];
+    } sm2_pki_secure_session_t;
+
 #define SM2_PKI_EVIDENCE_CACHE_DEFAULT_CAPACITY 8U
 #define SM2_PKI_EVIDENCE_CACHE_MAX_CAPACITY 64U
 
@@ -403,14 +419,20 @@ extern "C"
         const uint8_t *transcript, size_t transcript_len, uint64_t now_ts,
         uint8_t *session_key, size_t session_key_len, size_t *matched_ca_index);
 
-    sm2_pki_error_t sm2_pki_encrypt(sm2_pki_aead_mode_t mode,
-        const uint8_t key[16], const uint8_t *iv, size_t iv_len,
-        const uint8_t *aad, size_t aad_len, const uint8_t *plaintext,
-        size_t plaintext_len, uint8_t *ciphertext, size_t *ciphertext_len,
-        uint8_t *tag, size_t *tag_len);
+    sm2_pki_error_t sm2_pki_secure_session_init(
+        sm2_pki_secure_session_t *session, sm2_pki_aead_mode_t mode,
+        const uint8_t key[16], size_t key_len, sm2_pki_session_role_t role);
 
-    sm2_pki_error_t sm2_pki_decrypt(sm2_pki_aead_mode_t mode,
-        const uint8_t key[16], const uint8_t *iv, size_t iv_len,
+    void sm2_pki_secure_session_cleanup(sm2_pki_secure_session_t *session);
+
+    sm2_pki_error_t sm2_pki_secure_session_encrypt(
+        sm2_pki_secure_session_t *session, const uint8_t *aad, size_t aad_len,
+        const uint8_t *plaintext, size_t plaintext_len, uint64_t *sequence,
+        uint8_t *ciphertext, size_t *ciphertext_len, uint8_t *tag,
+        size_t *tag_len);
+
+    sm2_pki_error_t sm2_pki_secure_session_decrypt(
+        sm2_pki_secure_session_t *session, uint64_t sequence,
         const uint8_t *aad, size_t aad_len, const uint8_t *ciphertext,
         size_t ciphertext_len, const uint8_t *tag, size_t tag_len,
         uint8_t *plaintext, size_t *plaintext_len);

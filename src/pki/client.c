@@ -4283,20 +4283,134 @@ sm2_pki_error_t sm2_pki_secure_session_establish(sm2_pki_client_ctx_t *ctx,
     return SM2_PKI_SUCCESS;
 }
 
-sm2_pki_error_t sm2_pki_encrypt(sm2_pki_aead_mode_t mode, const uint8_t key[16],
-    const uint8_t *iv, size_t iv_len, const uint8_t *aad, size_t aad_len,
-    const uint8_t *plaintext, size_t plaintext_len, uint8_t *ciphertext,
-    size_t *ciphertext_len, uint8_t *tag, size_t *tag_len)
+static bool pki_session_role_valid(sm2_pki_session_role_t role)
 {
-    return sm2_pki_aead_encrypt(mode, key, iv, iv_len, aad, aad_len, plaintext,
-        plaintext_len, ciphertext, ciphertext_len, tag, tag_len);
+    return role == SM2_PKI_SESSION_ROLE_INITIATOR
+        || role == SM2_PKI_SESSION_ROLE_RESPONDER;
 }
 
-sm2_pki_error_t sm2_pki_decrypt(sm2_pki_aead_mode_t mode, const uint8_t key[16],
-    const uint8_t *iv, size_t iv_len, const uint8_t *aad, size_t aad_len,
-    const uint8_t *ciphertext, size_t ciphertext_len, const uint8_t *tag,
-    size_t tag_len, uint8_t *plaintext, size_t *plaintext_len)
+static sm2_pki_session_role_t pki_session_peer_role(sm2_pki_session_role_t role)
 {
-    return sm2_pki_aead_decrypt(mode, key, iv, iv_len, aad, aad_len, ciphertext,
-        ciphertext_len, tag, tag_len, plaintext, plaintext_len);
+    return role == SM2_PKI_SESSION_ROLE_INITIATOR
+        ? SM2_PKI_SESSION_ROLE_RESPONDER
+        : SM2_PKI_SESSION_ROLE_INITIATOR;
+}
+
+static sm2_pki_error_t pki_session_derive_iv(
+    const sm2_pki_secure_session_t *session, sm2_pki_session_role_t sender_role,
+    uint64_t sequence, uint8_t iv[SM2_AUTH_AEAD_IV_LEN])
+{
+    static const uint8_t tag[] = "SM2PKI_AEAD_IV_V1";
+    if (!session || !session->initialized
+        || !pki_session_role_valid(sender_role) || !iv)
+    {
+        return SM2_PKI_ERR_PARAM;
+    }
+
+    uint8_t auth[(sizeof(tag) - 1U) + 16U + 8U * 3U];
+    uint8_t digest[SM3_DIGEST_LENGTH];
+    size_t off = 0;
+    memcpy(auth + off, tag, sizeof(tag) - 1U);
+    off += sizeof(tag) - 1U;
+    memcpy(auth + off, session->key, sizeof(session->key));
+    off += sizeof(session->key);
+    pki_client_cache_u64_to_be((uint64_t)session->mode, auth + off);
+    off += 8U;
+    pki_client_cache_u64_to_be((uint64_t)sender_role, auth + off);
+    off += 8U;
+    pki_client_cache_u64_to_be(sequence, auth + off);
+    off += 8U;
+
+    sm2_pki_error_t ret = sm2_pki_sm3_hash(auth, off, digest);
+    if (ret == SM2_PKI_SUCCESS)
+        memcpy(iv, digest, SM2_AUTH_AEAD_IV_LEN);
+    sm2_secure_memzero(auth, sizeof(auth));
+    sm2_secure_memzero(digest, sizeof(digest));
+    return ret;
+}
+
+sm2_pki_error_t sm2_pki_secure_session_init(sm2_pki_secure_session_t *session,
+    sm2_pki_aead_mode_t mode, const uint8_t key[16], size_t key_len,
+    sm2_pki_session_role_t role)
+{
+    if (!session || !key || key_len != 16 || !pki_session_role_valid(role))
+        return SM2_PKI_ERR_PARAM;
+    if (mode != SM2_AUTH_AEAD_MODE_SM4_GCM
+        && mode != SM2_AUTH_AEAD_MODE_SM4_CCM)
+    {
+        return SM2_PKI_ERR_PARAM;
+    }
+
+    memset(session, 0, sizeof(*session));
+    session->initialized = true;
+    session->mode = mode;
+    session->role = role;
+    memcpy(session->key, key, sizeof(session->key));
+    return SM2_PKI_SUCCESS;
+}
+
+void sm2_pki_secure_session_cleanup(sm2_pki_secure_session_t *session)
+{
+    if (!session)
+        return;
+    sm2_secure_memzero(session, sizeof(*session));
+}
+
+sm2_pki_error_t sm2_pki_secure_session_encrypt(
+    sm2_pki_secure_session_t *session, const uint8_t *aad, size_t aad_len,
+    const uint8_t *plaintext, size_t plaintext_len, uint64_t *sequence,
+    uint8_t *ciphertext, size_t *ciphertext_len, uint8_t *tag, size_t *tag_len)
+{
+    if (!session || !session->initialized || !sequence)
+        return SM2_PKI_ERR_PARAM;
+    if (session->send_sequence == UINT64_MAX)
+        return SM2_PKI_ERR_CONFLICT;
+
+    uint8_t iv[SM2_AUTH_AEAD_IV_LEN];
+    uint64_t current_sequence = session->send_sequence;
+    sm2_pki_error_t ret
+        = pki_session_derive_iv(session, session->role, current_sequence, iv);
+    if (ret != SM2_PKI_SUCCESS)
+        return ret;
+
+    ret = sm2_pki_aead_encrypt(session->mode, session->key, iv, sizeof(iv), aad,
+        aad_len, plaintext, plaintext_len, ciphertext, ciphertext_len, tag,
+        tag_len);
+    sm2_secure_memzero(iv, sizeof(iv));
+    if (ret != SM2_PKI_SUCCESS)
+        return ret;
+
+    *sequence = current_sequence;
+    session->send_sequence++;
+    return SM2_PKI_SUCCESS;
+}
+
+sm2_pki_error_t sm2_pki_secure_session_decrypt(
+    sm2_pki_secure_session_t *session, uint64_t sequence, const uint8_t *aad,
+    size_t aad_len, const uint8_t *ciphertext, size_t ciphertext_len,
+    const uint8_t *tag, size_t tag_len, uint8_t *plaintext,
+    size_t *plaintext_len)
+{
+    if (!session || !session->initialized)
+        return SM2_PKI_ERR_PARAM;
+    if (sequence != session->receive_sequence)
+        return SM2_PKI_ERR_VERIFY;
+    if (session->receive_sequence == UINT64_MAX)
+        return SM2_PKI_ERR_CONFLICT;
+
+    uint8_t iv[SM2_AUTH_AEAD_IV_LEN];
+    sm2_pki_error_t ret = pki_session_derive_iv(
+        session, pki_session_peer_role(session->role), sequence, iv);
+    if (ret != SM2_PKI_SUCCESS)
+        return ret;
+
+    ret = sm2_pki_aead_decrypt(session->mode, session->key, iv, sizeof(iv), aad,
+        aad_len, ciphertext, ciphertext_len, tag, tag_len, plaintext,
+        plaintext_len);
+    sm2_secure_memzero(iv, sizeof(iv));
+    if (ret != SM2_PKI_SUCCESS)
+        return ret;
+
+    session->receive_sequence++;
+    return SM2_PKI_SUCCESS;
 }

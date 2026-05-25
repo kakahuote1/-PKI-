@@ -628,18 +628,32 @@ static void test_phase13_secure_pki_session_default_api()
 
     const uint8_t aad[] = "P13_AAD";
     const uint8_t plain[] = "P13_SECURE_PAYLOAD";
-    uint8_t iv[12];
-    TEST_ASSERT(sm2_pki_random(iv, sizeof(iv)) == SM2_PKI_SUCCESS, "Random IV");
     uint8_t cipher[sizeof(plain)];
     uint8_t recover[sizeof(plain)];
     uint8_t tag[SM2_AUTH_AEAD_TAG_MAX_LEN];
+    uint8_t original_tag[SM2_AUTH_AEAD_TAG_MAX_LEN];
     size_t cipher_len = sizeof(plain) - 1;
     size_t recover_len = sizeof(recover);
     size_t tag_len = sizeof(tag);
+    uint64_t sequence = UINT64_MAX;
+    sm2_pki_secure_session_t session_a;
+    sm2_pki_secure_session_t session_b;
+    memset(&session_a, 0, sizeof(session_a));
+    memset(&session_b, 0, sizeof(session_b));
+    TEST_ASSERT(sm2_pki_secure_session_init(&session_a,
+                    SM2_AUTH_AEAD_MODE_SM4_GCM, sk_a, sizeof(sk_a),
+                    SM2_PKI_SESSION_ROLE_INITIATOR)
+            == SM2_PKI_SUCCESS,
+        "Session A Init");
+    TEST_ASSERT(sm2_pki_secure_session_init(&session_b,
+                    SM2_AUTH_AEAD_MODE_SM4_GCM, sk_b, sizeof(sk_b),
+                    SM2_PKI_SESSION_ROLE_RESPONDER)
+            == SM2_PKI_SUCCESS,
+        "Session B Init");
 
     int gcm_available = test_pki_sm4_gcm_available();
-    sm2_pki_error_t aead_ret = sm2_pki_encrypt(SM2_AUTH_AEAD_MODE_SM4_GCM, sk_a,
-        iv, sizeof(iv), aad, sizeof(aad) - 1, plain, sizeof(plain) - 1, cipher,
+    sm2_pki_error_t aead_ret = sm2_pki_secure_session_encrypt(&session_a, aad,
+        sizeof(aad) - 1, plain, sizeof(plain) - 1, &sequence, cipher,
         &cipher_len, tag, &tag_len);
     if (!gcm_available)
     {
@@ -651,23 +665,49 @@ static void test_phase13_secure_pki_session_default_api()
     else
     {
         TEST_ASSERT(aead_ret == SM2_PKI_SUCCESS, "Encrypt AEAD");
-        TEST_ASSERT(sm2_pki_decrypt(SM2_AUTH_AEAD_MODE_SM4_GCM, sk_b, iv,
-                        sizeof(iv), aad, sizeof(aad) - 1, cipher, cipher_len,
-                        tag, tag_len, recover, &recover_len)
+        TEST_ASSERT(sequence == 0, "First Packet Sequence");
+        memcpy(original_tag, tag, tag_len);
+        TEST_ASSERT(sm2_pki_secure_session_decrypt(&session_b, sequence, aad,
+                        sizeof(aad) - 1, cipher, cipher_len, tag, tag_len,
+                        recover, &recover_len)
                 == SM2_PKI_SUCCESS,
             "Decrypt");
         TEST_ASSERT(recover_len == sizeof(plain) - 1, "Recover Len");
         TEST_ASSERT(
             memcmp(recover, plain, sizeof(plain) - 1) == 0, "Recover Plain");
 
+        recover_len = sizeof(recover);
+        TEST_ASSERT(sm2_pki_secure_session_decrypt(&session_b, sequence, aad,
+                        sizeof(aad) - 1, cipher, cipher_len, original_tag,
+                        tag_len, recover, &recover_len)
+                == SM2_PKI_ERR_VERIFY,
+            "Replay Sequence Reject");
+
+        cipher_len = sizeof(plain) - 1;
+        tag_len = sizeof(tag);
+        TEST_ASSERT(sm2_pki_secure_session_encrypt(&session_a, aad,
+                        sizeof(aad) - 1, plain, sizeof(plain) - 1, &sequence,
+                        cipher, &cipher_len, tag, &tag_len)
+                == SM2_PKI_SUCCESS,
+            "Encrypt Second Packet");
+        TEST_ASSERT(sequence == 1, "Second Packet Sequence");
+        memcpy(original_tag, tag, tag_len);
         tag[0] ^= 0x55;
         recover_len = sizeof(recover);
-        TEST_ASSERT(sm2_pki_decrypt(SM2_AUTH_AEAD_MODE_SM4_GCM, sk_b, iv,
-                        sizeof(iv), aad, sizeof(aad) - 1, cipher, cipher_len,
-                        tag, tag_len, recover, &recover_len)
+        TEST_ASSERT(sm2_pki_secure_session_decrypt(&session_b, sequence, aad,
+                        sizeof(aad) - 1, cipher, cipher_len, tag, tag_len,
+                        recover, &recover_len)
                 == SM2_PKI_ERR_VERIFY,
             "Tampered Tag Reject");
+        recover_len = sizeof(recover);
+        TEST_ASSERT(sm2_pki_secure_session_decrypt(&session_b, sequence, aad,
+                        sizeof(aad) - 1, cipher, cipher_len, original_tag,
+                        tag_len, recover, &recover_len)
+                == SM2_PKI_SUCCESS,
+            "Decrypt After Failed Tag");
     }
+    sm2_pki_secure_session_cleanup(&session_b);
+    sm2_pki_secure_session_cleanup(&session_a);
 
     sm2_pki_client_destroy(&client_b);
     sm2_pki_client_destroy(&client_a);
