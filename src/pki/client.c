@@ -4244,24 +4244,33 @@ sm2_pki_error_t sm2_pki_key_agreement(sm2_pki_client_ctx_t *ctx,
         session_key_len));
 }
 
+static sm2_pki_error_t pki_session_build_context(
+    const sm2_ec_point_t *local_ephemeral_public_key,
+    const sm2_ec_point_t *peer_ephemeral_public_key, const uint8_t *transcript,
+    size_t transcript_len, uint8_t context[SM2_PKI_SESSION_CONTEXT_LEN]);
+
 sm2_pki_error_t sm2_pki_secure_session_establish(sm2_pki_client_ctx_t *ctx,
     const sm2_private_key_t *local_ephemeral_private_key,
     const sm2_ec_point_t *local_ephemeral_public_key,
     const sm2_pki_verify_request_t *peer_request,
     const sm2_ec_point_t *peer_ephemeral_public_key, const uint8_t *transcript,
     size_t transcript_len, uint64_t now_ts, uint8_t *session_key,
-    size_t session_key_len, size_t *matched_ca_index)
+    size_t session_key_len,
+    uint8_t session_context[SM2_PKI_SESSION_CONTEXT_LEN],
+    size_t *matched_ca_index)
 {
     sm2_pki_client_state_t *state = pki_client_state(ctx);
     size_t local_matched_ca_index = 0;
     if (!ctx || !ctx->initialized || !state || !state->has_identity_keys
         || !local_ephemeral_private_key || !local_ephemeral_public_key
         || !peer_request || !peer_request->cert || !peer_request->public_key
-        || !peer_ephemeral_public_key || !session_key || session_key_len == 0)
+        || !peer_ephemeral_public_key || !session_key || session_key_len == 0
+        || !session_context)
     {
         return SM2_PKI_ERR_PARAM;
     }
     sm2_secure_memzero(session_key, session_key_len);
+    memset(session_context, 0, SM2_PKI_SESSION_CONTEXT_LEN);
 
     sm2_pki_error_t ret = pki_client_require_local_key_agreement(ctx);
     if (ret != SM2_PKI_SUCCESS)
@@ -4289,6 +4298,14 @@ sm2_pki_error_t sm2_pki_secure_session_establish(sm2_pki_client_ctx_t *ctx,
     if (ret != SM2_PKI_SUCCESS)
         return ret;
 
+    ret = pki_session_build_context(local_ephemeral_public_key,
+        peer_ephemeral_public_key, transcript, transcript_len, session_context);
+    if (ret != SM2_PKI_SUCCESS)
+    {
+        sm2_secure_memzero(session_key, session_key_len);
+        return ret;
+    }
+
     if (matched_ca_index)
         *matched_ca_index = local_matched_ca_index;
     return SM2_PKI_SUCCESS;
@@ -4307,24 +4324,101 @@ static sm2_pki_session_role_t pki_session_peer_role(sm2_pki_session_role_t role)
         : SM2_PKI_SESSION_ROLE_INITIATOR;
 }
 
+static bool pki_session_context_is_zero(
+    const uint8_t context[SM2_PKI_SESSION_CONTEXT_LEN])
+{
+    uint8_t acc = 0U;
+    for (size_t i = 0; i < SM2_PKI_SESSION_CONTEXT_LEN; ++i)
+        acc |= context[i];
+    return acc == 0U;
+}
+
+static int pki_session_point_cmp(
+    const sm2_ec_point_t *lhs, const sm2_ec_point_t *rhs)
+{
+    int cmp = memcmp(lhs->x, rhs->x, SM2_KEY_LEN);
+    return cmp != 0 ? cmp : memcmp(lhs->y, rhs->y, SM2_KEY_LEN);
+}
+
+static void pki_session_put_point(
+    uint8_t *auth, size_t *off, const sm2_ec_point_t *point)
+{
+    memcpy(auth + *off, point->x, SM2_KEY_LEN);
+    *off += SM2_KEY_LEN;
+    memcpy(auth + *off, point->y, SM2_KEY_LEN);
+    *off += SM2_KEY_LEN;
+}
+
+static sm2_pki_error_t pki_session_build_context(
+    const sm2_ec_point_t *local_ephemeral_public_key,
+    const sm2_ec_point_t *peer_ephemeral_public_key, const uint8_t *transcript,
+    size_t transcript_len, uint8_t context[SM2_PKI_SESSION_CONTEXT_LEN])
+{
+    static const uint8_t tag[] = "SM2PKI_SESSION_CONTEXT_V1";
+    if (!local_ephemeral_public_key || !peer_ephemeral_public_key || !context
+        || (!transcript && transcript_len > 0U))
+    {
+        return SM2_PKI_ERR_PARAM;
+    }
+
+    size_t fixed_len = (sizeof(tag) - 1U) + SM2_KEY_LEN * 4U + 8U;
+    if (transcript_len > SIZE_MAX - fixed_len)
+        return SM2_PKI_ERR_MEMORY;
+    size_t auth_len = fixed_len + transcript_len;
+    uint8_t *auth = (uint8_t *)malloc(auth_len);
+    if (!auth)
+        return SM2_PKI_ERR_MEMORY;
+
+    const sm2_ec_point_t *first = local_ephemeral_public_key;
+    const sm2_ec_point_t *second = peer_ephemeral_public_key;
+    if (pki_session_point_cmp(first, second) > 0)
+    {
+        first = peer_ephemeral_public_key;
+        second = local_ephemeral_public_key;
+    }
+
+    size_t off = 0;
+    memcpy(auth + off, tag, sizeof(tag) - 1U);
+    off += sizeof(tag) - 1U;
+    pki_session_put_point(auth, &off, first);
+    pki_session_put_point(auth, &off, second);
+    pki_client_cache_u64_to_be((uint64_t)transcript_len, auth + off);
+    off += 8U;
+    if (transcript_len > 0U)
+    {
+        memcpy(auth + off, transcript, transcript_len);
+        off += transcript_len;
+    }
+
+    sm2_pki_error_t ret = off == auth_len
+        ? sm2_pki_sm3_hash(auth, auth_len, context)
+        : SM2_PKI_ERR_STATE;
+    sm2_secure_memzero(auth, auth_len);
+    free(auth);
+    return ret;
+}
+
 static sm2_pki_error_t pki_session_derive_iv(
     const sm2_pki_secure_session_t *session, sm2_pki_session_role_t sender_role,
     uint64_t sequence, uint8_t iv[SM2_AUTH_AEAD_IV_LEN])
 {
-    static const uint8_t tag[] = "SM2PKI_AEAD_IV_V1";
+    static const uint8_t tag[] = "SM2PKI_AEAD_IV_V2";
     if (!session || !session->initialized
         || !pki_session_role_valid(sender_role) || !iv)
     {
         return SM2_PKI_ERR_PARAM;
     }
 
-    uint8_t auth[(sizeof(tag) - 1U) + 16U + 8U * 3U];
+    uint8_t
+        auth[(sizeof(tag) - 1U) + 16U + SM2_PKI_SESSION_CONTEXT_LEN + 8U * 3U];
     uint8_t digest[SM3_DIGEST_LENGTH];
     size_t off = 0;
     memcpy(auth + off, tag, sizeof(tag) - 1U);
     off += sizeof(tag) - 1U;
     memcpy(auth + off, session->key, sizeof(session->key));
     off += sizeof(session->key);
+    memcpy(auth + off, session->context, sizeof(session->context));
+    off += sizeof(session->context);
     pki_client_cache_u64_to_be((uint64_t)session->mode, auth + off);
     off += 8U;
     pki_client_cache_u64_to_be((uint64_t)sender_role, auth + off);
@@ -4342,9 +4436,16 @@ static sm2_pki_error_t pki_session_derive_iv(
 
 sm2_pki_error_t sm2_pki_secure_session_init(sm2_pki_secure_session_t *session,
     sm2_pki_aead_mode_t mode, const uint8_t key[16], size_t key_len,
-    sm2_pki_session_role_t role)
+    const uint8_t session_context[SM2_PKI_SESSION_CONTEXT_LEN],
+    size_t session_context_len, sm2_pki_session_role_t role)
 {
-    if (!session || !key || key_len != 16 || !pki_session_role_valid(role))
+    if (!session || !key || key_len != 16 || !session_context
+        || session_context_len != SM2_PKI_SESSION_CONTEXT_LEN
+        || !pki_session_role_valid(role))
+    {
+        return SM2_PKI_ERR_PARAM;
+    }
+    if (pki_session_context_is_zero(session_context))
         return SM2_PKI_ERR_PARAM;
     if (mode != SM2_AUTH_AEAD_MODE_SM4_GCM
         && mode != SM2_AUTH_AEAD_MODE_SM4_CCM)
@@ -4357,6 +4458,7 @@ sm2_pki_error_t sm2_pki_secure_session_init(sm2_pki_secure_session_t *session,
     session->mode = mode;
     session->role = role;
     memcpy(session->key, key, sizeof(session->key));
+    memcpy(session->context, session_context, sizeof(session->context));
     return SM2_PKI_SUCCESS;
 }
 

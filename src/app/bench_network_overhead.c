@@ -897,6 +897,8 @@ static double measure_secure_session_median(void)
         sm2_pki_verify_request_t req_b_to_a;
         uint8_t sk_a[16];
         uint8_t sk_b[16];
+        uint8_t session_context_a[SM2_PKI_SESSION_CONTEXT_LEN];
+        uint8_t session_context_b[SM2_PKI_SESSION_CONTEXT_LEN];
         size_t matched_a = 0;
         size_t matched_b = 0;
 
@@ -912,6 +914,8 @@ static double measure_secure_session_median(void)
         memset(&checkpoint_b, 0, sizeof(checkpoint_b));
         memset(&req_a_to_b, 0, sizeof(req_a_to_b));
         memset(&req_b_to_a, 0, sizeof(req_b_to_a));
+        memset(session_context_a, 0, sizeof(session_context_a));
+        memset(session_context_b, 0, sizeof(session_context_b));
 
         double t0 = now_ms_highres();
         if (sm2_pki_generate_ephemeral_keypair(&eph_priv_a, &eph_pub_a)
@@ -970,14 +974,17 @@ static double measure_secure_session_median(void)
         if (sm2_pki_secure_session_establish(ctx.client_a, &eph_priv_a,
                 &eph_pub_a, &req_b_to_a, &eph_pub_b, transcript,
                 sizeof(transcript) - 1, ctx.auth_now, sk_a, sizeof(sk_a),
-                &matched_a)
+                session_context_a, &matched_a)
                 != SM2_PKI_SUCCESS
             || sm2_pki_secure_session_establish(ctx.client_b, &eph_priv_b,
                    &eph_pub_b, &req_a_to_b, &eph_pub_a, transcript,
                    sizeof(transcript) - 1, ctx.auth_now, sk_b, sizeof(sk_b),
-                   &matched_b)
+                   session_context_b, &matched_b)
                 != SM2_PKI_SUCCESS
-            || memcmp(sk_a, sk_b, sizeof(sk_a)) != 0)
+            || memcmp(sk_a, sk_b, sizeof(sk_a)) != 0
+            || memcmp(session_context_a, session_context_b,
+                   sizeof(session_context_a))
+                != 0)
         {
             cleanup_session_context(&ctx);
             return 0.0;

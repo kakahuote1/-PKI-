@@ -602,33 +602,40 @@ static void test_phase13_secure_pki_session_default_api()
 
     uint8_t sk_a[16];
     uint8_t sk_b[16];
+    uint8_t session_context_a[SM2_PKI_SESSION_CONTEXT_LEN];
+    uint8_t session_context_b[SM2_PKI_SESSION_CONTEXT_LEN];
     size_t matched_a = 0;
     size_t matched_b = 0;
     TEST_ASSERT(
         sm2_pki_secure_session_establish(client_a, &eph_priv_a, &eph_pub_a,
             &req_b_to_a, &eph_pub_a, transcript, sizeof(transcript) - 1,
-            auth_now, sk_a, sizeof(sk_a), &matched_a)
+            auth_now, sk_a, sizeof(sk_a), session_context_a, &matched_a)
             == SM2_PKI_ERR_VERIFY,
         "Reject Unbound Peer Ephemeral");
     TEST_ASSERT(
         sm2_pki_secure_session_establish(client_a, &eph_priv_a, &eph_pub_a,
             &req_b_to_a, &eph_pub_b, transcript, sizeof(transcript) - 1,
-            auth_now, sk_a, sizeof(sk_a), &matched_a)
+            auth_now, sk_a, sizeof(sk_a), session_context_a, &matched_a)
             == SM2_PKI_SUCCESS,
         "Secure Session A");
     TEST_ASSERT(
         sm2_pki_secure_session_establish(client_b, &eph_priv_b, &eph_pub_b,
             &req_a_to_b, &eph_pub_a, transcript, sizeof(transcript) - 1,
-            auth_now, sk_b, sizeof(sk_b), &matched_b)
+            auth_now, sk_b, sizeof(sk_b), session_context_b, &matched_b)
             == SM2_PKI_SUCCESS,
         "Secure Session B");
     TEST_ASSERT(matched_a == 0 && matched_b == 0, "Matched Default CA");
     TEST_ASSERT(
         memcmp(sk_a, sk_b, sizeof(sk_a)) == 0, "Secure Session Keys Match");
+    TEST_ASSERT(memcmp(session_context_a, session_context_b,
+                    sizeof(session_context_a))
+            == 0,
+        "Secure Session Contexts Match");
 
     const uint8_t aad[] = "P13_AAD";
     const uint8_t plain[] = "P13_SECURE_PAYLOAD";
     uint8_t cipher[sizeof(plain)];
+    uint8_t original_cipher[sizeof(plain)];
     uint8_t recover[sizeof(plain)];
     uint8_t tag[SM2_AUTH_AEAD_TAG_MAX_LEN];
     uint8_t original_tag[SM2_AUTH_AEAD_TAG_MAX_LEN];
@@ -642,11 +649,13 @@ static void test_phase13_secure_pki_session_default_api()
     memset(&session_b, 0, sizeof(session_b));
     TEST_ASSERT(sm2_pki_secure_session_init(&session_a,
                     SM2_AUTH_AEAD_MODE_SM4_GCM, sk_a, sizeof(sk_a),
+                    session_context_a, sizeof(session_context_a),
                     SM2_PKI_SESSION_ROLE_INITIATOR)
             == SM2_PKI_SUCCESS,
         "Session A Init");
     TEST_ASSERT(sm2_pki_secure_session_init(&session_b,
                     SM2_AUTH_AEAD_MODE_SM4_GCM, sk_b, sizeof(sk_b),
+                    session_context_b, sizeof(session_context_b),
                     SM2_PKI_SESSION_ROLE_RESPONDER)
             == SM2_PKI_SUCCESS,
         "Session B Init");
@@ -666,6 +675,7 @@ static void test_phase13_secure_pki_session_default_api()
     {
         TEST_ASSERT(aead_ret == SM2_PKI_SUCCESS, "Encrypt AEAD");
         TEST_ASSERT(sequence == 0, "First Packet Sequence");
+        memcpy(original_cipher, cipher, cipher_len);
         memcpy(original_tag, tag, tag_len);
         TEST_ASSERT(sm2_pki_secure_session_decrypt(&session_b, sequence, aad,
                         sizeof(aad) - 1, cipher, cipher_len, tag, tag_len,
@@ -682,6 +692,53 @@ static void test_phase13_secure_pki_session_default_api()
                         tag_len, recover, &recover_len)
                 == SM2_PKI_ERR_VERIFY,
             "Replay Sequence Reject");
+
+        uint8_t alternate_context[SM2_PKI_SESSION_CONTEXT_LEN];
+        memcpy(alternate_context, session_context_a, sizeof(alternate_context));
+        alternate_context[0] ^= 0xA5U;
+        sm2_pki_secure_session_t alternate_sender;
+        sm2_pki_secure_session_t context_bound_receiver;
+        memset(&alternate_sender, 0, sizeof(alternate_sender));
+        memset(&context_bound_receiver, 0, sizeof(context_bound_receiver));
+        TEST_ASSERT(sm2_pki_secure_session_init(&alternate_sender,
+                        SM2_AUTH_AEAD_MODE_SM4_GCM, sk_a, sizeof(sk_a),
+                        alternate_context, sizeof(alternate_context),
+                        SM2_PKI_SESSION_ROLE_INITIATOR)
+                == SM2_PKI_SUCCESS,
+            "Alternate Context Sender Init");
+        TEST_ASSERT(sm2_pki_secure_session_init(&context_bound_receiver,
+                        SM2_AUTH_AEAD_MODE_SM4_GCM, sk_b, sizeof(sk_b),
+                        session_context_b, sizeof(session_context_b),
+                        SM2_PKI_SESSION_ROLE_RESPONDER)
+                == SM2_PKI_SUCCESS,
+            "Context Bound Receiver Init");
+        uint8_t alternate_cipher[sizeof(plain)];
+        uint8_t alternate_tag[SM2_AUTH_AEAD_TAG_MAX_LEN];
+        size_t alternate_cipher_len = sizeof(plain) - 1;
+        size_t alternate_tag_len = sizeof(alternate_tag);
+        uint64_t alternate_sequence = UINT64_MAX;
+        TEST_ASSERT(sm2_pki_secure_session_encrypt(&alternate_sender, aad,
+                        sizeof(aad) - 1, plain, sizeof(plain) - 1,
+                        &alternate_sequence, alternate_cipher,
+                        &alternate_cipher_len, alternate_tag,
+                        &alternate_tag_len)
+                == SM2_PKI_SUCCESS,
+            "Encrypt Alternate Context");
+        TEST_ASSERT(alternate_sequence == 0, "Alternate Context Sequence");
+        TEST_ASSERT(alternate_cipher_len != cipher_len
+                || memcmp(alternate_cipher, original_cipher, cipher_len) != 0
+                || alternate_tag_len != tag_len
+                || memcmp(alternate_tag, original_tag, tag_len) != 0,
+            "Alternate Context Changes AEAD Output");
+        recover_len = sizeof(recover);
+        TEST_ASSERT(sm2_pki_secure_session_decrypt(&context_bound_receiver,
+                        alternate_sequence, aad, sizeof(aad) - 1,
+                        alternate_cipher, alternate_cipher_len, alternate_tag,
+                        alternate_tag_len, recover, &recover_len)
+                == SM2_PKI_ERR_VERIFY,
+            "Wrong Session Context Reject");
+        sm2_pki_secure_session_cleanup(&context_bound_receiver);
+        sm2_pki_secure_session_cleanup(&alternate_sender);
 
         cipher_len = sizeof(plain) - 1;
         tag_len = sizeof(tag);
