@@ -971,6 +971,13 @@ static bool pki_client_bytes_equal_ct(
     return diff == 0;
 }
 
+static bool pki_client_device_secret_valid(
+    const uint8_t *device_secret, size_t device_secret_len)
+{
+    return device_secret
+        && device_secret_len >= SM2_PKI_CLIENT_PERSISTED_STORAGE_SECRET_MIN_LEN;
+}
+
 static sm2_pki_error_t pki_client_hmac_sm3(const uint8_t *key, size_t key_len,
     const uint8_t *data, size_t data_len,
     uint8_t out[SM2_PKI_EPOCH_ROOT_DIGEST_LEN])
@@ -1062,7 +1069,8 @@ static sm2_pki_error_t pki_client_persisted_storage_slot_tag(
     uint8_t tag[SM2_PKI_CLIENT_PERSISTED_STORAGE_TAG_LEN])
 {
     static const uint8_t domain[] = "TinyPKI persisted storage slot v1";
-    if (!slot || !tag)
+    if (!slot || !tag
+        || !pki_client_device_secret_valid(device_secret, device_secret_len))
         return SM2_PKI_ERR_PARAM;
 
     size_t auth_len = sizeof(domain) - 1U + 4U + 4U + 8U + sizeof(slot->state);
@@ -1095,7 +1103,8 @@ static bool pki_client_persisted_storage_slot_valid(
     const sm2_pki_client_persisted_storage_slot_t *slot,
     const uint8_t *device_secret, size_t device_secret_len)
 {
-    if (!slot || !device_secret || device_secret_len == 0)
+    if (!slot
+        || !pki_client_device_secret_valid(device_secret, device_secret_len))
         return false;
     if (slot->magic != SM2_PKI_CLIENT_PERSISTED_STORAGE_MAGIC
         || slot->format_version != SM2_PKI_CLIENT_PERSISTED_STORAGE_VERSION
@@ -3535,7 +3544,8 @@ sm2_pki_error_t sm2_pki_client_persisted_storage_store(
     const sm2_pki_client_persisted_state_t *state, const uint8_t *device_secret,
     size_t device_secret_len)
 {
-    if (!storage || !state || !device_secret || device_secret_len == 0)
+    if (!storage || !state
+        || !pki_client_device_secret_valid(device_secret, device_secret_len))
         return SM2_PKI_ERR_PARAM;
 
     sm2_pki_error_t ret = pki_client_persisted_state_shape_valid(state);
@@ -3590,7 +3600,8 @@ sm2_pki_error_t sm2_pki_client_persisted_storage_load(
     size_t device_secret_len, uint64_t minimum_sequence_floor,
     uint64_t *selected_sequence)
 {
-    if (!storage || !state || !device_secret || device_secret_len == 0)
+    if (!storage || !state
+        || !pki_client_device_secret_valid(device_secret, device_secret_len))
         return SM2_PKI_ERR_PARAM;
 
     size_t selected = SM2_PKI_CLIENT_PERSISTED_STORAGE_SLOT_COUNT;
