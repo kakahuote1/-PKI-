@@ -1492,8 +1492,19 @@ static void test_phase137_persisted_storage_double_slot_recovery()
 
     sm2_pki_client_persisted_storage_t storage;
     sm2_pki_client_persisted_storage_init(&storage);
-    const uint8_t device_secret[] = "P137_STORAGE_DEVICE_SECRET";
-    const uint8_t wrong_secret[] = "P137_STORAGE_WRONG_SECRET";
+    const uint8_t device_secret[]
+        = "P137_STORAGE_DEVICE_SECRET_32_BYTES_MIN_OK";
+    const uint8_t wrong_secret[]
+        = "P137_STORAGE_WRONG_SECRET_32_BYTES_MIN_OK";
+    const uint8_t weak_secret[] = "short";
+    TEST_ASSERT(sm2_pki_client_persisted_storage_store(&storage,
+                    &state_initial, weak_secret, sizeof(weak_secret) - 1)
+            == SM2_PKI_ERR_PARAM,
+        "Weak Device Secret Store Rejected");
+    TEST_ASSERT(sm2_pki_client_persisted_storage_load(&storage, &state_initial,
+                    weak_secret, sizeof(weak_secret) - 1, 0, NULL)
+            == SM2_PKI_ERR_PARAM,
+        "Weak Device Secret Load Rejected");
     TEST_ASSERT(sm2_pki_client_persisted_storage_store(&storage, &state_initial,
                     device_secret, sizeof(device_secret) - 1)
             == SM2_PKI_SUCCESS,
