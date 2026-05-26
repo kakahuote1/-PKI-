@@ -408,10 +408,34 @@ static void test_phase4_pki_controls_and_param_defense()
         "Key Agreement NULL Ephemeral");
 
     sm2_pki_secure_session_t aead_session;
+    uint8_t zero_session_context[SM2_PKI_SESSION_CONTEXT_LEN];
+    uint8_t session_context[SM2_PKI_SESSION_CONTEXT_LEN];
     memset(&aead_session, 0, sizeof(aead_session));
+    memset(zero_session_context, 0, sizeof(zero_session_context));
+    memset(session_context, 0xA5, sizeof(session_context));
     TEST_ASSERT(sm2_pki_secure_session_init(&aead_session,
                     SM2_AUTH_AEAD_MODE_SM4_GCM, session_key,
-                    sizeof(session_key), SM2_PKI_SESSION_ROLE_INITIATOR)
+                    sizeof(session_key), NULL, sizeof(session_context),
+                    SM2_PKI_SESSION_ROLE_INITIATOR)
+            == SM2_PKI_ERR_PARAM,
+        "Secure Session Init NULL Context");
+    TEST_ASSERT(sm2_pki_secure_session_init(&aead_session,
+                    SM2_AUTH_AEAD_MODE_SM4_GCM, session_key,
+                    sizeof(session_key), zero_session_context,
+                    sizeof(zero_session_context), SM2_PKI_SESSION_ROLE_INITIATOR)
+            == SM2_PKI_ERR_PARAM,
+        "Secure Session Init Zero Context");
+    TEST_ASSERT(sm2_pki_secure_session_init(&aead_session,
+                    SM2_AUTH_AEAD_MODE_SM4_GCM, session_key,
+                    sizeof(session_key), session_context,
+                    sizeof(session_context) - 1U,
+                    SM2_PKI_SESSION_ROLE_INITIATOR)
+            == SM2_PKI_ERR_PARAM,
+        "Secure Session Init Short Context");
+    TEST_ASSERT(sm2_pki_secure_session_init(&aead_session,
+                    SM2_AUTH_AEAD_MODE_SM4_GCM, session_key,
+                    sizeof(session_key), session_context,
+                    sizeof(session_context), SM2_PKI_SESSION_ROLE_INITIATOR)
             == SM2_PKI_SUCCESS,
         "Secure Session Init");
     uint64_t aead_sequence = 0;

@@ -203,6 +203,8 @@ extern "C"
         SM2_PKI_SESSION_ROLE_RESPONDER = 2
     } sm2_pki_session_role_t;
 
+#define SM2_PKI_SESSION_CONTEXT_LEN SM2_PKI_EPOCH_ROOT_DIGEST_LEN
+
     typedef struct
     {
         bool initialized;
@@ -211,6 +213,7 @@ extern "C"
         uint64_t send_sequence;
         uint64_t receive_sequence;
         uint8_t key[16];
+        uint8_t context[SM2_PKI_SESSION_CONTEXT_LEN];
     } sm2_pki_secure_session_t;
 
 #define SM2_PKI_EVIDENCE_CACHE_DEFAULT_CAPACITY 8U
@@ -418,11 +421,15 @@ extern "C"
         const sm2_pki_verify_request_t *peer_request,
         const sm2_ec_point_t *peer_ephemeral_public_key,
         const uint8_t *transcript, size_t transcript_len, uint64_t now_ts,
-        uint8_t *session_key, size_t session_key_len, size_t *matched_ca_index);
+        uint8_t *session_key, size_t session_key_len,
+        uint8_t session_context[SM2_PKI_SESSION_CONTEXT_LEN],
+        size_t *matched_ca_index);
 
     sm2_pki_error_t sm2_pki_secure_session_init(
         sm2_pki_secure_session_t *session, sm2_pki_aead_mode_t mode,
-        const uint8_t key[16], size_t key_len, sm2_pki_session_role_t role);
+        const uint8_t key[16], size_t key_len,
+        const uint8_t session_context[SM2_PKI_SESSION_CONTEXT_LEN],
+        size_t session_context_len, sm2_pki_session_role_t role);
 
     void sm2_pki_secure_session_cleanup(sm2_pki_secure_session_t *session);
 
