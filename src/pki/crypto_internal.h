@@ -11,6 +11,9 @@ sm2_pki_error_t sm2_pki_error_from_ic(sm2_ic_error_t err);
 sm2_pki_error_t sm2_pki_random(uint8_t *buf, size_t len);
 sm2_pki_error_t sm2_pki_sm3_hash(
     const uint8_t *input, size_t input_len, uint8_t output[SM3_DIGEST_LENGTH]);
+sm2_pki_error_t sm2_pki_sm3_hash_segments(const uint8_t *const *inputs,
+    const size_t *input_lens, size_t input_count,
+    uint8_t output[SM3_DIGEST_LENGTH]);
 
 sm2_pki_error_t sm2_crypto_sign(const sm2_private_key_t *private_key,
     const uint8_t *message, size_t message_len,
