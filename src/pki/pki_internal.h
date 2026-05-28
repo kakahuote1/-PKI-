@@ -247,6 +247,8 @@ struct sm2_pki_client_ctx_st
     size_t evidence_cache_capacity;
     size_t evidence_cache_protected_capacity;
     uint64_t evidence_cache_counter;
+    bool evidence_cache_has_last_index;
+    size_t evidence_cache_last_index;
     sm2_pki_evidence_cache_stats_t evidence_cache_stats;
 
     sm2_pki_transparency_witness_t

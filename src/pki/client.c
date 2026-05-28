@@ -625,6 +625,42 @@ static void pki_client_cache_reset(sm2_pki_client_state_t *state)
             state->evidence_cache_capacity * sizeof(*state->evidence_cache));
     }
     state->evidence_cache_counter = 0;
+    state->evidence_cache_has_last_index = false;
+    state->evidence_cache_last_index = 0;
+}
+
+static void pki_client_cache_remember_entry(sm2_pki_client_state_t *state,
+    const sm2_pki_verified_evidence_cache_entry_t *entry)
+{
+    if (!state || !state->evidence_cache || !entry)
+    {
+        return;
+    }
+    for (size_t i = 0; i < state->evidence_cache_capacity; i++)
+    {
+        if (&state->evidence_cache[i] == entry)
+        {
+            state->evidence_cache_last_index = i;
+            state->evidence_cache_has_last_index = true;
+            return;
+        }
+    }
+}
+
+static void pki_client_cache_forget_entry(sm2_pki_client_state_t *state,
+    const sm2_pki_verified_evidence_cache_entry_t *entry)
+{
+    if (!state || !state->evidence_cache || !entry
+        || !state->evidence_cache_has_last_index
+        || state->evidence_cache_last_index >= state->evidence_cache_capacity)
+    {
+        return;
+    }
+    if (&state->evidence_cache[state->evidence_cache_last_index] == entry)
+    {
+        state->evidence_cache_has_last_index = false;
+        state->evidence_cache_last_index = 0;
+    }
 }
 
 static void pki_client_cache_reset_authority(sm2_pki_client_state_t *state,
@@ -643,7 +679,10 @@ static void pki_client_cache_reset_authority(sm2_pki_client_state_t *state,
         if (!entry->used || entry->authority_id_len != authority_id_len)
             continue;
         if (memcmp(entry->authority_id, authority_id, authority_id_len) == 0)
+        {
+            pki_client_cache_forget_entry(state, entry);
             memset(entry, 0, sizeof(*entry));
+        }
     }
 }
 
@@ -658,6 +697,8 @@ static void pki_client_cache_release(sm2_pki_client_state_t *state)
     state->evidence_cache_capacity = 0;
     state->evidence_cache_protected_capacity = 0;
     state->evidence_cache_counter = 0;
+    state->evidence_cache_has_last_index = false;
+    state->evidence_cache_last_index = 0;
     memset(
         &state->evidence_cache_stats, 0, sizeof(state->evidence_cache_stats));
 }
@@ -708,6 +749,8 @@ static sm2_pki_error_t pki_client_cache_configure(
     state->evidence_cache_protected_capacity
         = pki_client_cache_default_protected_capacity(capacity);
     state->evidence_cache_counter = 0;
+    state->evidence_cache_has_last_index = false;
+    state->evidence_cache_last_index = 0;
     memset(
         &state->evidence_cache_stats, 0, sizeof(state->evidence_cache_stats));
     return SM2_PKI_SUCCESS;
@@ -755,6 +798,7 @@ static void pki_client_cache_evict_entry(sm2_pki_client_state_t *state,
 {
     if (!state || !entry || !entry->used)
         return;
+    pki_client_cache_forget_entry(state, entry);
     memset(entry, 0, sizeof(*entry));
     state->evidence_cache_stats.eviction_count++;
 }
@@ -770,6 +814,7 @@ static void pki_client_cache_prune_expired(
             = &state->evidence_cache[i];
         if (!entry->used || entry->valid_until >= now_ts)
             continue;
+        pki_client_cache_forget_entry(state, entry);
         memset(entry, 0, sizeof(*entry));
         state->evidence_cache_stats.expiration_count++;
     }
@@ -1757,6 +1802,57 @@ static uint64_t pki_client_cert_valid_until(const sm2_implicit_cert_t *cert)
     return cert->valid_from + cert->valid_duration;
 }
 
+static bool pki_client_evidence_cache_entry_matches(
+    const sm2_pki_verified_evidence_cache_entry_t *entry,
+    const sm2_implicit_cert_t *cert, const sm2_pki_epoch_root_record_t *epoch,
+    const uint8_t epoch_digest[SM2_PKI_EPOCH_ROOT_DIGEST_LEN],
+    const uint8_t cert_commitment[SM2_PKI_ISSUANCE_COMMITMENT_LEN],
+    const uint8_t proof_digest[SM2_PKI_EPOCH_ROOT_DIGEST_LEN],
+    size_t matched_ca_index)
+{
+    return entry && entry->used && cert && epoch && epoch_digest
+        && cert_commitment && proof_digest
+        && entry->serial_number == cert->serial_number
+        && entry->pinned_ca_index == matched_ca_index
+        && entry->authority_id_len == epoch->authority_id_len
+        && memcmp(entry->authority_id, epoch->authority_id,
+               epoch->authority_id_len)
+        == 0
+        && pki_client_bytes_equal_ct(entry->cert_commitment, cert_commitment,
+            SM2_PKI_ISSUANCE_COMMITMENT_LEN)
+        && pki_client_bytes_equal_ct(
+            entry->epoch_digest, epoch_digest, SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
+        && pki_client_bytes_equal_ct(
+            entry->proof_digest, proof_digest, SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
+        && entry->epoch_version == epoch->epoch_version
+        && entry->revocation_root_version == epoch->revocation_root_version
+        && memcmp(entry->revocation_root_hash, epoch->revocation_root_hash,
+               SM2_REV_MERKLE_HASH_LEN)
+        == 0
+        && entry->issuance_root_version == epoch->issuance_root_version
+        && memcmp(entry->issuance_root_hash, epoch->issuance_root_hash,
+               SM2_REV_MERKLE_HASH_LEN)
+        == 0;
+}
+
+static bool pki_client_evidence_cache_touch_hit(sm2_pki_client_state_t *state,
+    sm2_pki_verified_evidence_cache_entry_t *entry)
+{
+    if (!state || !entry)
+        return false;
+    if (state->evidence_cache_counter == UINT64_MAX)
+    {
+        pki_client_cache_reset(state);
+        return false;
+    }
+    state->evidence_cache_counter++;
+    entry->last_used_counter = state->evidence_cache_counter;
+    state->evidence_cache_stats.hit_count++;
+    pki_client_cache_promote(state, entry);
+    pki_client_cache_remember_entry(state, entry);
+    return true;
+}
+
 static bool pki_client_evidence_cache_hit(sm2_pki_client_state_t *state,
     const sm2_implicit_cert_t *cert, const sm2_pki_epoch_root_record_t *epoch,
     const uint8_t epoch_digest[SM2_PKI_EPOCH_ROOT_DIGEST_LEN],
@@ -1777,47 +1873,32 @@ static bool pki_client_evidence_cache_hit(sm2_pki_client_state_t *state,
         return false;
     }
 
-    for (size_t i = 0; i < state->evidence_cache_capacity; i++)
+    if (state->evidence_cache_has_last_index
+        && state->evidence_cache_last_index < state->evidence_cache_capacity)
     {
         sm2_pki_verified_evidence_cache_entry_t *entry
-            = &state->evidence_cache[i];
-        if (!entry->used)
-            continue;
-        if (entry->serial_number != cert->serial_number
-            || entry->pinned_ca_index != matched_ca_index
-            || entry->authority_id_len != epoch->authority_id_len
-            || memcmp(entry->authority_id, epoch->authority_id,
-                   epoch->authority_id_len)
-                != 0
-            || !pki_client_bytes_equal_ct(entry->cert_commitment,
-                cert_commitment, SM2_PKI_ISSUANCE_COMMITMENT_LEN)
-            || !pki_client_bytes_equal_ct(entry->epoch_digest, epoch_digest,
-                SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
-            || !pki_client_bytes_equal_ct(entry->proof_digest, proof_digest,
-                SM2_PKI_EPOCH_ROOT_DIGEST_LEN)
-            || entry->epoch_version != epoch->epoch_version
-            || entry->revocation_root_version != epoch->revocation_root_version
-            || memcmp(entry->revocation_root_hash, epoch->revocation_root_hash,
-                   SM2_REV_MERKLE_HASH_LEN)
-                != 0
-            || entry->issuance_root_version != epoch->issuance_root_version
-            || memcmp(entry->issuance_root_hash, epoch->issuance_root_hash,
-                   SM2_REV_MERKLE_HASH_LEN)
-                != 0)
+            = &state->evidence_cache[state->evidence_cache_last_index];
+        if (pki_client_evidence_cache_entry_matches(entry, cert, epoch,
+                epoch_digest, cert_commitment, proof_digest, matched_ca_index))
         {
-            continue;
+            return pki_client_evidence_cache_touch_hit(state, entry);
         }
+    }
 
-        if (state->evidence_cache_counter == UINT64_MAX)
+    for (size_t i = 0; i < state->evidence_cache_capacity; i++)
+    {
+        if (state->evidence_cache_has_last_index
+            && i == state->evidence_cache_last_index)
         {
-            pki_client_cache_reset(state);
-            return false;
+            continue;
         }
-        state->evidence_cache_counter++;
-        entry->last_used_counter = state->evidence_cache_counter;
-        state->evidence_cache_stats.hit_count++;
-        pki_client_cache_promote(state, entry);
-        return true;
+        sm2_pki_verified_evidence_cache_entry_t *entry
+            = &state->evidence_cache[i];
+        if (pki_client_evidence_cache_entry_matches(entry, cert, epoch,
+                epoch_digest, cert_commitment, proof_digest, matched_ca_index))
+        {
+            return pki_client_evidence_cache_touch_hit(state, entry);
+        }
     }
     state->evidence_cache_stats.miss_count++;
     return false;
@@ -1875,6 +1956,7 @@ static void pki_client_evidence_cache_store(sm2_pki_client_state_t *state,
     slot->valid_until = valid_until;
     state->evidence_cache_counter++;
     slot->last_used_counter = state->evidence_cache_counter;
+    pki_client_cache_remember_entry(state, slot);
     state->evidence_cache_stats.store_count++;
 }
 
