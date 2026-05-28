@@ -7,6 +7,7 @@
 
 #include "crypto_internal.h"
 #include "../auth/auth_internal.h"
+#include <openssl/evp.h>
 
 sm2_pki_error_t sm2_pki_error_from_ic(sm2_ic_error_t err)
 {
@@ -36,6 +37,51 @@ sm2_pki_error_t sm2_pki_sm3_hash(
     const uint8_t *input, size_t input_len, uint8_t output[SM3_DIGEST_LENGTH])
 {
     return sm2_pki_error_from_ic(sm2_ic_sm3_hash(input, input_len, output));
+}
+
+sm2_pki_error_t sm2_pki_sm3_hash_segments(const uint8_t *const *inputs,
+    const size_t *input_lens, size_t input_count,
+    uint8_t output[SM3_DIGEST_LENGTH])
+{
+    if (!output || (!inputs && input_count > 0U)
+        || (!input_lens && input_count > 0U))
+    {
+        return SM2_PKI_ERR_PARAM;
+    }
+
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx)
+        return SM2_PKI_ERR_MEMORY;
+
+    sm2_pki_error_t ret = SM2_PKI_ERR_CRYPTO;
+    const EVP_MD *md = EVP_sm3();
+    if (!md || EVP_DigestInit_ex(mdctx, md, NULL) != 1)
+        goto cleanup;
+
+    for (size_t i = 0; i < input_count; i++)
+    {
+        if (!inputs[i] && input_lens[i] > 0U)
+        {
+            ret = SM2_PKI_ERR_PARAM;
+            goto cleanup;
+        }
+        if (input_lens[i] > 0U
+            && EVP_DigestUpdate(mdctx, inputs[i], input_lens[i]) != 1)
+        {
+            goto cleanup;
+        }
+    }
+
+    unsigned int len = SM3_DIGEST_LENGTH;
+    if (EVP_DigestFinal_ex(mdctx, output, &len) == 1
+        && len == SM3_DIGEST_LENGTH)
+    {
+        ret = SM2_PKI_SUCCESS;
+    }
+
+cleanup:
+    EVP_MD_CTX_free(mdctx);
+    return ret;
 }
 
 sm2_pki_error_t sm2_crypto_sign(const sm2_private_key_t *private_key,

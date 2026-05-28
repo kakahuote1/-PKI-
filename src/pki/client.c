@@ -4355,19 +4355,12 @@ static sm2_pki_error_t pki_session_build_context(
     size_t transcript_len, uint8_t context[SM2_PKI_SESSION_CONTEXT_LEN])
 {
     static const uint8_t tag[] = "SM2PKI_SESSION_CONTEXT_V1";
+    uint8_t fixed[(sizeof(tag) - 1U) + SM2_KEY_LEN * 4U + 8U];
     if (!local_ephemeral_public_key || !peer_ephemeral_public_key || !context
         || (!transcript && transcript_len > 0U))
     {
         return SM2_PKI_ERR_PARAM;
     }
-
-    size_t fixed_len = (sizeof(tag) - 1U) + SM2_KEY_LEN * 4U + 8U;
-    if (transcript_len > SIZE_MAX - fixed_len)
-        return SM2_PKI_ERR_MEMORY;
-    size_t auth_len = fixed_len + transcript_len;
-    uint8_t *auth = (uint8_t *)malloc(auth_len);
-    if (!auth)
-        return SM2_PKI_ERR_MEMORY;
 
     const sm2_ec_point_t *first = local_ephemeral_public_key;
     const sm2_ec_point_t *second = peer_ephemeral_public_key;
@@ -4378,23 +4371,19 @@ static sm2_pki_error_t pki_session_build_context(
     }
 
     size_t off = 0;
-    memcpy(auth + off, tag, sizeof(tag) - 1U);
+    memcpy(fixed + off, tag, sizeof(tag) - 1U);
     off += sizeof(tag) - 1U;
-    pki_session_put_point(auth, &off, first);
-    pki_session_put_point(auth, &off, second);
-    pki_client_cache_u64_to_be((uint64_t)transcript_len, auth + off);
+    pki_session_put_point(fixed, &off, first);
+    pki_session_put_point(fixed, &off, second);
+    pki_client_cache_u64_to_be((uint64_t)transcript_len, fixed + off);
     off += 8U;
-    if (transcript_len > 0U)
-    {
-        memcpy(auth + off, transcript, transcript_len);
-        off += transcript_len;
-    }
 
-    sm2_pki_error_t ret = off == auth_len
-        ? sm2_pki_sm3_hash(auth, auth_len, context)
+    const uint8_t *segments[2] = { fixed, transcript };
+    size_t segment_lens[2] = { off, transcript_len };
+    sm2_pki_error_t ret = off == sizeof(fixed)
+        ? sm2_pki_sm3_hash_segments(segments, segment_lens, 2U, context)
         : SM2_PKI_ERR_STATE;
-    sm2_secure_memzero(auth, auth_len);
-    free(auth);
+    sm2_secure_memzero(fixed, sizeof(fixed));
     return ret;
 }
 
